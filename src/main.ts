@@ -21,7 +21,8 @@ import {
   updateLocalPrintJob,
   pendingLocalPrintJobs,
 } from './data/print-local';
-import { localAuthState, setupPin, verifyPin, storedSessionToken, adminRedirectPath } from './runtime/local-auth';
+import { localAuthState, setupPin, verifyPin, storedSessionToken, adminRedirectPath, sessionSnapshot } from './runtime/local-auth';
+import { saveSessionSnapshot } from './runtime/session-store';
 
 type MirrorRow = Record<string, unknown>;
 const byNumber = (key: string) => (rows: MirrorRow[]) =>
@@ -148,6 +149,8 @@ async function boot() {
         verifyPin,
         storedToken: storedSessionToken,
         redirectPath: () => adminRedirectPath(config.adminPathSecret),
+        saveSnapshot: saveSessionSnapshot,
+        snapshot: sessionSnapshot,
       },
       print: {
         expectedToken: expectedAgentToken,

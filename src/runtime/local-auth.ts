@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getMeta, setMeta, readMirrorTable } from '../data/db';
-import { getAdminToken } from './session-store';
+import { getActivationToken, hasActivation, getSessionSnapshot } from './session-store';
 
 /**
  * PIN de emergência — login offline (Fase 3).
@@ -26,16 +26,17 @@ export interface LocalAuthState {
 export function localAuthState(): LocalAuthState {
   return {
     hasPin: getMeta('pin_hash') !== null,
-    hasSession: getAdminToken() !== null,
+    // Ativação durável — sobrevive a logout offline, ao contrário da sessão viva
+    hasSession: hasActivation(),
   };
 }
 
-/** Define/atualiza o PIN. Exige uma sessão capturada (login online prévio). */
+/** Define/atualiza o PIN. Exige uma ativação (login online prévio neste PC). */
 export function setupPin(pin: string): { ok: true } | { ok: false; error: string } {
   if (!/^\d{4,8}$/.test(pin)) {
     return { ok: false, error: 'O PIN deve ter de 4 a 8 dígitos.' };
   }
-  if (!getAdminToken()) {
+  if (!hasActivation()) {
     return { ok: false, error: 'Faça login com internet antes de definir o PIN de emergência.' };
   }
   const salt = crypto.randomBytes(16);
@@ -59,9 +60,14 @@ export function verifyPin(pin: string): boolean {
   }
 }
 
-/** Token guardado (para re-instalar a sessão após o PIN). */
+/** Token durável para re-instalar a sessão após o PIN (sobrevive a logout offline). */
 export function storedSessionToken(): string | null {
-  return getAdminToken();
+  return getActivationToken();
+}
+
+/** Snapshot da sessão do supabase-js p/ o cliente restaurar no localStorage. */
+export function sessionSnapshot(): string | null {
+  return getSessionSnapshot();
 }
 
 /** Caminho do admin p/ redirecionar após o login por PIN: /<slug>/admin/<secret>. */

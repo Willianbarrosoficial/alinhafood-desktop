@@ -53,6 +53,8 @@ export interface GatewayOptions {
     verifyPin: (pin: string) => boolean;
     storedToken: () => string | null;
     redirectPath: () => string | null;
+    saveSnapshot: (json: string) => void;
+    snapshot: () => string | null;
   };
   /** Impressão local (Fase 3/4): agente C# consome jobs locais primeiro */
   print?: {
@@ -198,6 +200,14 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
   /** Proxy do login/logout capturando o token p/ autenticar o sync engine. */
   async function handleAuthSession(req: http.IncomingMessage, res: http.ServerResponse) {
+    // Logout offline é quase sempre falso alarme (o cliente não alcançou o
+    // Supabase e "achou" que deslogou). Não tocamos na sessão guardada — senão
+    // o PIN de emergência perderia a sessão que ele precisa re-instalar.
+    if (req.method === 'DELETE' && !health.isOnline()) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, offline: true }));
+      return;
+    }
     const body = await readBody(req).catch(() => Buffer.alloc(0));
     const status = await proxy(req, res, cloudClient, cloud.host, true, body);
     if (status !== null && status < 300) {
@@ -213,7 +223,7 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
         }
       } else if (req.method === 'DELETE') {
         clearAdminToken();
-        console.log('[gateway] sessão admin limpa');
+        console.log('[gateway] sessão admin limpa (logout online)');
       }
     }
   }
@@ -258,7 +268,8 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
         'content-type': 'application/json',
         'set-cookie': setCookie,
       });
-      res.end(JSON.stringify({ ok: true, redirect: auth.redirectPath() }));
+      // session = snapshot do supabase-js para o cliente restaurar no localStorage
+      res.end(JSON.stringify({ ok: true, redirect: auth.redirectPath(), session: auth.snapshot() }));
     } catch (err) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: `body inválido: ${(err as Error).message}` }));
@@ -393,6 +404,22 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
     if (url === '/api/local/auth/pin-login' && req.method === 'POST') {
       void handlePinLogin(req, res);
+      return;
+    }
+
+    if (url === '/api/local/auth/snapshot' && req.method === 'POST' && options.localAuth) {
+      void (async () => {
+        try {
+          const raw = (await readBody(req)).toString('utf8');
+          const parsed = JSON.parse(raw) as { session?: unknown };
+          if (parsed.session) options.localAuth!.saveSnapshot(JSON.stringify(parsed.session));
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body inválido' }));
+        }
+      })();
       return;
     }
 
