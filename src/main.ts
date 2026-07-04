@@ -7,6 +7,25 @@ import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable } from './data/db';
 
+type MirrorRow = Record<string, unknown>;
+const byNumber = (key: string) => (rows: MirrorRow[]) =>
+  [...rows].sort((a, b) => Number(a[key] ?? 0) - Number(b[key] ?? 0));
+
+/** Tabelas do espelho expostas em /api/local/query/<nome>, com a mesma
+ *  ordenação das queries originais do web (supabase-queries.ts). */
+const MIRROR_QUERIES: Record<string, (rows: MirrorRow[]) => MirrorRow[]> = {
+  products: (rows) =>
+    [...rows].sort(
+      (a, b) =>
+        Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0) ||
+        String(a.name ?? '').localeCompare(String(b.name ?? '')),
+    ),
+  categories: byNumber('sort_order'),
+  tables: byNumber('number'),
+  store_settings: (rows) => rows,
+  restaurants: (rows) => rows,
+};
+
 let appServer: AppServerHandle | null = null;
 let gateway: GatewayHandle | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -85,10 +104,9 @@ async function boot() {
       isPackaged: app.isPackaged,
       syncStatus: () => ({ ...pull!.status() }),
       localQuery: (name) => {
-        // Fase 2: leitura crua do espelho por tabela (a Fase 3 traz queries nomeadas)
-        if (name === 'mirror') return undefined; // reservado
-        const known = readMirrorTable(name);
-        return known.length > 0 ? known : known; // sempre responde (pode ser [])
+        const sorter = MIRROR_QUERIES[name];
+        if (!sorter) return undefined; // tabela fora da whitelist → 404
+        return sorter(readMirrorTable(name));
       },
     });
 
