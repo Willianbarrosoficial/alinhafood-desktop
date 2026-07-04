@@ -46,6 +46,6 @@ ws.onmessage = (event) => {
 };
 
 setTimeout(() => {
-  console.log('--- fim da escuta (90s) ---');
+  console.log('--- fim da escuta (180s) ---');
   process.exit(0);
-}, 90_000);
+}, 180_000);

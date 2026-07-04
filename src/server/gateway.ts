@@ -39,6 +39,8 @@ export interface GatewayOptions {
   localCreateOrder?: (body: unknown) =>
     | { ok: true; orderId: string; orderNumber: string }
     | { ok: false; status: number; error: string };
+  /** JWKS pública do Supabase guardada no espelho (validação ES256 offline) */
+  getJwks?: () => string | null;
 }
 
 export interface GatewayHandle {
@@ -197,6 +199,18 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
   }
 
   function handleLocal(req: http.IncomingMessage, res: http.ServerResponse, url: string) {
+    if (url === '/api/local/jwks') {
+      const jwks = options.getJwks?.();
+      if (!jwks) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'jwks_not_synced' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(jwks);
+      return;
+    }
+
     if (url === '/api/local/status' || url === '/desktop/status') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(

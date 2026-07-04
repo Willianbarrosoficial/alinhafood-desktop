@@ -197,6 +197,23 @@ export class PullEngine {
       setMeta('subscription_active', String(payload.subscription_active));
       setMeta('subscription_checked_at', payload.server_time);
       setMeta('last_sync_at', new Date().toISOString());
+
+      // JWKS pública do Supabase — permite ao middleware validar a sessão
+      // ES256 localmente durante o apagão (servida em /api/local/jwks).
+      try {
+        const jwksRes = await request(
+          `${this.config.supabaseUrl.replace(/\/$/, '')}/auth/v1/.well-known/jwks.json`,
+          { method: 'GET', headersTimeout: 10_000, bodyTimeout: 10_000 },
+        );
+        if (jwksRes.statusCode === 200) {
+          const jwks = await jwksRes.body.text();
+          if (jwks.includes('"keys"')) setMeta('jwks', jwks);
+        } else {
+          await jwksRes.body.dump();
+        }
+      } catch {
+        // sem JWKS nova — a guardada continua valendo
+      }
       this.lastError = null;
       console.log(
         `[sync] espelho atualizado: ${Object.entries(payload.tables)

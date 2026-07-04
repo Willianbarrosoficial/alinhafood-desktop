@@ -69,6 +69,9 @@ export async function startAppServer(config: DesktopConfig): Promise<AppServerHa
       HOSTNAME: '127.0.0.1',
       // Runtime desktop — usado pelos seams das fases 2+ na Alinhafood 01
       ALINHAFOOD_RUNTIME: 'desktop',
+      // Middleware valida sessão ES256 com a JWKS do espelho local (funciona
+      // no apagão; o gateway serve o cache em /api/local/jwks)
+      ALINHAFOOD_JWKS_URL: `http://127.0.0.1:${config.gatewayPort}/api/local/jwks`,
       // Envs públicas exigidas pelo middleware (verifyAdminJwt slow-path) e páginas.
       // NUNCA adicionar SERVICE_ROLE/JWT_SECRET aqui — veto arquitetural.
       NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,

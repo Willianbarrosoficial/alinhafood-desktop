@@ -5,7 +5,7 @@ import { startAppServer, type AppServerHandle } from './server/boot';
 import { startGateway, type GatewayHandle } from './server/gateway';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
-import { getDb, readMirrorTable } from './data/db';
+import { getDb, readMirrorTable, getMeta } from './data/db';
 import { createLocalOrder, listTableActiveOrders, type CreateLocalOrderBody } from './data/orders-local';
 
 type MirrorRow = Record<string, unknown>;
@@ -115,6 +115,7 @@ async function boot() {
         return sorter(readMirrorTable(name));
       },
       localCreateOrder: (body) => createLocalOrder(body as CreateLocalOrderBody),
+      getJwks: () => getMeta('jwks'),
     });
 
     health.start();
