@@ -6,6 +6,7 @@ import { startGateway, type GatewayHandle } from './server/gateway';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta } from './data/db';
+import { serveImage, localImageUrl, syncImages } from './data/image-cache';
 import {
   createLocalOrder,
   listTableActiveOrders,
@@ -42,6 +43,19 @@ const MIRROR_QUERIES: Record<string, (rows: MirrorRow[]) => MirrorRow[]> = {
   store_settings: (rows) => rows,
   restaurants: (rows) => rows,
 };
+
+/** Aponta as imagens do cardápio pro cache local do gateway (offline mostra fotos). */
+function rewriteImages(name: string, rows: MirrorRow[], gatewayPort: number): MirrorRow[] {
+  const rewrite = (v: unknown) =>
+    typeof v === 'string' && /^https?:\/\//.test(v) ? localImageUrl(v, gatewayPort) : v;
+  if (name === 'products') {
+    return rows.map((r) => ({ ...r, image_url: rewrite(r.image_url) }));
+  }
+  if (name === 'store_settings') {
+    return rows.map((r) => ({ ...r, logo_url: rewrite(r.logo_url), cover_url: rewrite(r.cover_url) }));
+  }
+  return rows;
+}
 
 let appServer: AppServerHandle | null = null;
 let gateway: GatewayHandle | null = null;
@@ -139,10 +153,11 @@ async function boot() {
         }
         const sorter = MIRROR_QUERIES[name];
         if (!sorter) return undefined; // tabela fora da whitelist → 404
-        return sorter(readMirrorTable(name));
+        return rewriteImages(name, sorter(readMirrorTable(name)), config.gatewayPort);
       },
       localCreateOrder: (body) => createLocalOrder(body as CreateLocalOrderBody),
       getJwks: () => getMeta('jwks'),
+      serveImage,
       localAuth: {
         state: localAuthState,
         setupPin,
@@ -162,6 +177,9 @@ async function boot() {
 
     health.start();
     pull.start();
+    // Cacheia as imagens do cardápio já no boot (espelho da sessão anterior),
+    // independente de login — assim ficam prontas antes de qualquer apagão.
+    void syncImages();
 
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
     createWindow(localOrigin);

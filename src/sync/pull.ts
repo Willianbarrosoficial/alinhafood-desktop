@@ -4,6 +4,7 @@ import type { HealthMonitor } from '../runtime/health-monitor';
 import { getAdminToken } from '../runtime/session-store';
 import { replaceMirrorTable, setMeta, getMeta, mirrorCounts, getDb } from '../data/db';
 import { markOrderPushed } from '../data/orders-local';
+import { syncImages } from '../data/image-cache';
 
 /**
  * Down-sync (Fase 2): snapshot das tabelas de leitura do escopo de salão.
@@ -221,6 +222,9 @@ export class PullEngine {
           .map(([t, r]) => `${t}=${r.length}`)
           .join(' ')}`,
       );
+
+      // Imagens do cardápio em background — não bloqueia o ciclo de sync
+      void syncImages();
     } catch (err) {
       this.lastError = (err as Error).message;
       console.error('[sync] falha no pull:', this.lastError);

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import fs from 'node:fs';
 import { Client } from 'undici';
 import type { DesktopConfig } from '../config';
 import type { HealthMonitor } from '../runtime/health-monitor';
@@ -46,6 +47,8 @@ export interface GatewayOptions {
     | undefined;
   /** JWKS pública do Supabase guardada no espelho (validação ES256 offline) */
   getJwks?: () => string | null;
+  /** Serve imagem do cardápio do cache local (Fase 3 — imagens offline) */
+  serveImage?: (url: string) => Promise<{ path: string; contentType: string } | null>;
   /** PIN de emergência — login offline (Fase 3) */
   localAuth?: {
     state: () => { hasPin: boolean; hasSession: boolean };
@@ -496,6 +499,26 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
         })();
         return;
       }
+    }
+
+    if (url.startsWith('/api/local/image') && options.serveImage) {
+      void (async () => {
+        try {
+          const original = new URL(url, localOrigin).searchParams.get('u');
+          const img = original ? await options.serveImage!(original) : null;
+          if (!img) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          res.writeHead(200, { 'content-type': img.contentType, 'cache-control': 'max-age=86400' });
+          fs.createReadStream(img.path).pipe(res);
+        } catch {
+          res.writeHead(404);
+          res.end();
+        }
+      })();
+      return;
     }
 
     if (url.startsWith('/api/local/') || url === '/desktop/status') {
