@@ -7,6 +7,7 @@ import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta } from './data/db';
 import { serveImage, localImageUrl, syncImages } from './data/image-cache';
+import { backupIfDue, backupBeforeUpdate } from './data/backup';
 import {
   createLocalOrder,
   listTableActiveOrders,
@@ -112,6 +113,10 @@ async function setupAutoUpdater() {
   const { autoUpdater } = await import('electron-updater');
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  // Snapshot de segurança antes de aplicar uma atualização (rollback possível)
+  autoUpdater.on('update-downloaded', () => {
+    void backupBeforeUpdate();
+  });
   const check = () => autoUpdater.checkForUpdatesAndNotify().catch((err) => {
     console.error('[updater] falha ao checar atualização:', err.message);
   });
@@ -180,6 +185,8 @@ async function boot() {
     // Cacheia as imagens do cardápio já no boot (espelho da sessão anterior),
     // independente de login — assim ficam prontas antes de qualquer apagão.
     void syncImages();
+    // Backup diário do banco local (rotativo)
+    void backupIfDue();
 
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
     createWindow(localOrigin);
