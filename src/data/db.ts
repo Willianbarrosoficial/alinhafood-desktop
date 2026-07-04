@@ -64,7 +64,22 @@ export function getDb(): Database.Database {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_outbox_status ON sync_outbox (status, id);
+
+    -- Mudanças offline sobre pedidos que JÁ existem na nuvem (status, pago):
+    -- o espelho é read-only, então o patch local vive aqui até o replay subir.
+    CREATE TABLE IF NOT EXISTS order_overrides (
+      order_id TEXT PRIMARY KEY,
+      patch TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  // Migração aditiva: método HTTP do replay (PATCH p/ status, POST demais)
+  try {
+    db.exec("ALTER TABLE sync_outbox ADD COLUMN method TEXT NOT NULL DEFAULT 'POST'");
+  } catch {
+    // coluna já existe
+  }
 
   if (!getMeta('device_id')) setMeta('device_id', crypto.randomUUID());
 

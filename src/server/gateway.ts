@@ -39,6 +39,11 @@ export interface GatewayOptions {
   localCreateOrder?: (body: unknown) =>
     | { ok: true; orderId: string; orderNumber: string }
     | { ok: false; status: number; error: string };
+  /** Demais escritas offline: update-status, mark-paid... (Fase 3) */
+  localWrite?: (action: string, body: unknown) =>
+    | { ok: true }
+    | { ok: false; status: number; error: string }
+    | undefined;
   /** JWKS pública do Supabase guardada no espelho (validação ES256 offline) */
   getJwks?: () => string | null;
 }
@@ -288,11 +293,39 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     }
   }
 
+  async function handleLocalWrite(req: http.IncomingMessage, res: http.ServerResponse, action: string) {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8')) as unknown;
+      const result = options.localWrite?.(action, body);
+      if (!result) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unknown_local_action' }));
+        return;
+      }
+      if (result.ok) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, offline: true }));
+      } else {
+        res.writeHead(result.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: result.error }));
+      }
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `body inválido: ${(err as Error).message}` }));
+    }
+  }
+
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
 
     if (url === '/api/local/orders' && req.method === 'POST') {
       void handleLocalOrder(req, res);
+      return;
+    }
+
+    const writeMatch = url.match(/^\/api\/local\/write\/([\w-]+)$/);
+    if (writeMatch && req.method === 'POST') {
+      void handleLocalWrite(req, res, writeMatch[1]!);
       return;
     }
 

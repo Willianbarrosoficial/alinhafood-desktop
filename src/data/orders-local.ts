@@ -159,6 +159,139 @@ export function createLocalOrder(body: CreateLocalOrderBody):
   return { ok: true, orderId, orderNumber };
 }
 
+/** Patch local (status/pagamento offline) aplicado sobre pedidos do espelho. */
+function applyOverride(order: MirrorOrder): MirrorOrder {
+  const row = getDb()
+    .prepare('SELECT patch FROM order_overrides WHERE order_id = ?')
+    .get(order.id) as { patch: string } | undefined;
+  if (!row) return order;
+  return { ...order, ...(JSON.parse(row.patch) as Record<string, unknown>) };
+}
+
+function upsertOverride(orderId: string, patch: Record<string, unknown>): void {
+  const db = getDb();
+  const existing = db
+    .prepare('SELECT patch FROM order_overrides WHERE order_id = ?')
+    .get(orderId) as { patch: string } | undefined;
+  const merged = { ...(existing ? (JSON.parse(existing.patch) as Record<string, unknown>) : {}), ...patch };
+  db.prepare(
+    `INSERT INTO order_overrides (order_id, patch, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(order_id) DO UPDATE SET patch = excluded.patch, updated_at = excluded.updated_at`,
+  ).run(orderId, JSON.stringify(merged), new Date().toISOString());
+}
+
+/** Aplica patch num pedido offline ainda local: entidade E payload pendente juntos. */
+function patchOfflineOrder(orderId: string, patch: Record<string, unknown>): boolean {
+  const db = getDb();
+  const row = db.prepare('SELECT data, pushed FROM offline_orders WHERE id = ?').get(orderId) as
+    | { data: string; pushed: number }
+    | undefined;
+  if (!row) return false;
+
+  const data = { ...(JSON.parse(row.data) as Record<string, unknown>), ...patch };
+  db.transaction(() => {
+    db.prepare(
+      'UPDATE offline_orders SET data = ?, status = COALESCE(?, status), payment_status = COALESCE(?, payment_status) WHERE id = ?',
+    ).run(
+      JSON.stringify(data),
+      (patch.status as string) ?? null,
+      (patch.payment_status as string) ?? null,
+      orderId,
+    );
+    if (row.pushed === 0) {
+      // Ainda na fila: o pedido sobe já com o estado final — um evento só.
+      const evt = db
+        .prepare(
+          "SELECT id, payload FROM sync_outbox WHERE entity = 'order' AND entity_id = ? AND status = 'pending'",
+        )
+        .get(orderId) as { id: number; payload: string } | undefined;
+      if (evt) {
+        const payload = JSON.parse(evt.payload) as { order: Record<string, unknown>; items: unknown[] };
+        payload.order = { ...payload.order, ...patch };
+        db.prepare('UPDATE sync_outbox SET payload = ? WHERE id = ?').run(JSON.stringify(payload), evt.id);
+      }
+    }
+  })();
+  return row.pushed === 1; // true = já está na nuvem, precisa de replay próprio
+}
+
+export function updateLocalOrderStatus(body: {
+  order_id?: string;
+  status?: string;
+  restaurant_id?: string;
+}): { ok: true } | { ok: false; status: number; error: string } {
+  const { order_id: orderId, status, restaurant_id: restaurantId } = body;
+  if (!orderId || !status) return { ok: false, status: 400, error: 'order_id e status são obrigatórios' };
+  if (status === 'cancelled') {
+    return { ok: false, status: 422, error: 'Cancelamento exige conexão (PIN de segurança).' };
+  }
+
+  const isLocal = getDb().prepare('SELECT 1 FROM offline_orders WHERE id = ?').get(orderId);
+  const needsReplay = isLocal ? patchOfflineOrder(orderId, { status }) : true;
+  if (!isLocal) upsertOverride(orderId, { status });
+
+  if (needsReplay) {
+    getDb()
+      .prepare(
+        `INSERT INTO sync_outbox (entity, entity_id, endpoint, method, payload, created_at)
+         VALUES ('order-status', ?, ?, 'PATCH', ?, ?)`,
+      )
+      .run(
+        orderId,
+        `/api/admin/orders/${orderId}/status`,
+        JSON.stringify({ status, ...(restaurantId ? { restaurant_id: restaurantId } : {}) }),
+        new Date().toISOString(),
+      );
+  }
+  console.log(`[offline] status do pedido ${orderId.slice(0, 8)} → ${status}`);
+  return { ok: true };
+}
+
+export function markLocalOrdersPaid(body: {
+  order_ids?: string[];
+  restaurant_id?: string;
+  options?: Record<string, unknown>;
+}): { ok: true } | { ok: false; status: number; error: string } {
+  const ids = body.order_ids ?? [];
+  const restaurantId = body.restaurant_id;
+  if (ids.length === 0 || !restaurantId) {
+    return { ok: false, status: 400, error: 'order_ids e restaurant_id são obrigatórios' };
+  }
+  const options = body.options ?? {};
+  const paidPatch: Record<string, unknown> = {
+    payment_status: 'paid',
+    ...(options.payment_method ? { payment_method: options.payment_method } : {}),
+  };
+
+  const needReplay: string[] = [];
+  for (const id of ids) {
+    const isLocal = getDb().prepare('SELECT 1 FROM offline_orders WHERE id = ?').get(id);
+    if (isLocal) {
+      if (patchOfflineOrder(id, paidPatch)) needReplay.push(id);
+    } else {
+      upsertOverride(id, paidPatch);
+      needReplay.push(id);
+    }
+  }
+
+  if (needReplay.length > 0) {
+    // Um evento só, no formato do endpoint da nuvem (inclui service fee,
+    // troco e split de pagamentos exatamente como a tela enviou).
+    getDb()
+      .prepare(
+        `INSERT INTO sync_outbox (entity, entity_id, endpoint, method, payload, created_at)
+         VALUES ('mark-paid', ?, '/api/admin/orders/mark-paid', 'POST', ?, ?)`,
+      )
+      .run(
+        needReplay.join(','),
+        JSON.stringify({ restaurant_id: restaurantId, order_ids: needReplay, ...options }),
+        new Date().toISOString(),
+      );
+  }
+  console.log(`[offline] ${ids.length} pedido(s) marcados como pagos (${needReplay.length} p/ replay)`);
+  return { ok: true };
+}
+
 /** As telas leem o nome via order_items[].products.name — enriquece do espelho. */
 function enrichItemsWithProductName(order: MirrorOrder): MirrorOrder {
   const items = order.order_items;
@@ -175,26 +308,42 @@ function enrichItemsWithProductName(order: MirrorOrder): MirrorOrder {
   };
 }
 
-/** Comandas ativas da mesa: espelho da nuvem (pré-queda) + pedidos offline, sem duplicar. */
-export function listTableActiveOrders(tableNumber: number): MirrorOrder[] {
-  const mirror = readMirrorTable<MirrorOrder>('active_orders').filter(
-    (o) =>
-      Number(o.table_number) === tableNumber &&
-      o.payment_status !== 'paid' &&
-      ACTIVE_STATUSES.has(String(o.status)),
-  );
-
+/** Espelho + pedidos offline fundidos, com overrides aplicados e sem duplicatas. */
+function mergedOrders(): MirrorOrder[] {
+  const mirror = readMirrorTable<MirrorOrder>('active_orders').map(applyOverride);
   const local = (getDb()
-    .prepare('SELECT data FROM offline_orders WHERE table_number = ? AND payment_status != ?')
-    .all(tableNumber, 'paid') as Array<{ data: string }>).map(
-    (r) => JSON.parse(r.data) as MirrorOrder,
-  );
-
+    .prepare('SELECT data FROM offline_orders ORDER BY created_at DESC LIMIT 200')
+    .all() as Array<{ data: string }>).map((r) => JSON.parse(r.data) as MirrorOrder);
   const seen = new Set(local.map((o) => o.id));
-  const merged = [...local, ...mirror.filter((o) => !seen.has(o.id))];
-  return merged
+  return [...local, ...mirror.filter((o) => !seen.has(o.id))]
     .map(enrichItemsWithProductName)
     .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+}
+
+const isActiveUnpaid = (o: MirrorOrder) =>
+  o.payment_status !== 'paid' && ACTIVE_STATUSES.has(String(o.status));
+
+/** Comandas ativas da mesa: espelho da nuvem (pré-queda) + pedidos offline, sem duplicar. */
+export function listTableActiveOrders(tableNumber: number): MirrorOrder[] {
+  return mergedOrders().filter(
+    (o) => Number(o.table_number) === tableNumber && isActiveUnpaid(o),
+  );
+}
+
+/** Grade de mesas do salão: pedidos de mesa ativos e não pagos (todas as mesas). */
+export function listMesaActiveOrders(): MirrorOrder[] {
+  return mergedOrders().filter(
+    (o) => (o as { order_type?: string }).order_type === 'mesa' && isActiveUnpaid(o),
+  );
+}
+
+/**
+ * Feed de "Meus Pedidos" offline: comandas ativas do espelho (inclui delivery
+ * que JÁ estava em andamento antes da queda) + pedidos criados offline.
+ * Delivery novo não existe offline por definição — não chega sem nuvem.
+ */
+export function listOrdersFeed(): MirrorOrder[] {
+  return mergedOrders().slice(0, 100);
 }
 
 export function markOrderPushed(orderId: string): void {

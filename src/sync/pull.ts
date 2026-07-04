@@ -30,6 +30,7 @@ interface OutboxRow {
   entity: string;
   entity_id: string;
   endpoint: string;
+  method: string;
   payload: string;
   attempts: number;
 }
@@ -96,7 +97,7 @@ export class PullEngine {
   private async drainOutbox(token: string): Promise<void> {
     const db = getDb();
     const pending = db
-      .prepare("SELECT id, entity, entity_id, endpoint, payload, attempts FROM sync_outbox WHERE status = 'pending' ORDER BY id")
+      .prepare("SELECT id, entity, entity_id, endpoint, method, payload, attempts FROM sync_outbox WHERE status = 'pending' ORDER BY id")
       .all() as OutboxRow[];
     if (pending.length === 0) return;
 
@@ -104,7 +105,7 @@ export class PullEngine {
     for (const evt of pending) {
       try {
         const res = await request(`${this.config.cloudUrl.replace(/\/$/, '')}${evt.endpoint}`, {
-          method: 'POST',
+          method: (evt.method || 'POST') as 'POST',
           headers: {
             authorization: `Bearer ${token}`,
             'content-type': 'application/json',

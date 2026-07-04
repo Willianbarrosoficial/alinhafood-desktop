@@ -6,7 +6,15 @@ import { startGateway, type GatewayHandle } from './server/gateway';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta } from './data/db';
-import { createLocalOrder, listTableActiveOrders, type CreateLocalOrderBody } from './data/orders-local';
+import {
+  createLocalOrder,
+  listTableActiveOrders,
+  listMesaActiveOrders,
+  listOrdersFeed,
+  updateLocalOrderStatus,
+  markLocalOrdersPaid,
+  type CreateLocalOrderBody,
+} from './data/orders-local';
 
 type MirrorRow = Record<string, unknown>;
 const byNumber = (key: string) => (rows: MirrorRow[]) =>
@@ -104,7 +112,18 @@ async function boot() {
       health,
       isPackaged: app.isPackaged,
       syncStatus: () => ({ ...pull!.status() }),
+      localWrite: (action, body) => {
+        if (action === 'update-status') {
+          return updateLocalOrderStatus(body as Parameters<typeof updateLocalOrderStatus>[0]);
+        }
+        if (action === 'mark-paid') {
+          return markLocalOrdersPaid(body as Parameters<typeof markLocalOrdersPaid>[0]);
+        }
+        return undefined;
+      },
       localQuery: (name, params) => {
+        if (name === 'orders-feed') return listOrdersFeed();
+        if (name === 'mesa-active-orders') return listMesaActiveOrders();
         if (name === 'table-active-orders') {
           const table = Number(params.get('table_number'));
           if (!Number.isFinite(table)) return [];
