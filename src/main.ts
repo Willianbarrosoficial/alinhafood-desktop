@@ -6,6 +6,7 @@ import { startGateway, type GatewayHandle } from './server/gateway';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable } from './data/db';
+import { createLocalOrder, listTableActiveOrders, type CreateLocalOrderBody } from './data/orders-local';
 
 type MirrorRow = Record<string, unknown>;
 const byNumber = (key: string) => (rows: MirrorRow[]) =>
@@ -103,11 +104,17 @@ async function boot() {
       health,
       isPackaged: app.isPackaged,
       syncStatus: () => ({ ...pull!.status() }),
-      localQuery: (name) => {
+      localQuery: (name, params) => {
+        if (name === 'table-active-orders') {
+          const table = Number(params.get('table_number'));
+          if (!Number.isFinite(table)) return [];
+          return listTableActiveOrders(table);
+        }
         const sorter = MIRROR_QUERIES[name];
         if (!sorter) return undefined; // tabela fora da whitelist → 404
         return sorter(readMirrorTable(name));
       },
+      localCreateOrder: (body) => createLocalOrder(body as CreateLocalOrderBody),
     });
 
     health.start();

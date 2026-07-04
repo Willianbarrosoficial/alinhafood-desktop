@@ -36,6 +36,34 @@ export function getDb(): Database.Database {
       PRIMARY KEY (table_name, id)
     );
     CREATE INDEX IF NOT EXISTS idx_mirror_table ON mirror_rows (table_name);
+
+    -- Fase 3: escrita offline. Pedido criado offline vive aqui até a nuvem
+    -- confirmar (pushed=1); o evento de subida nasce na MESMA transação.
+    CREATE TABLE IF NOT EXISTS offline_orders (
+      id TEXT PRIMARY KEY,
+      restaurant_id TEXT NOT NULL,
+      table_number INTEGER,
+      order_number TEXT,
+      status TEXT NOT NULL,
+      payment_status TEXT NOT NULL DEFAULT 'unpaid',
+      created_at TEXT NOT NULL,
+      data TEXT NOT NULL,
+      pushed INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_offline_orders_table ON offline_orders (table_number, pushed);
+
+    CREATE TABLE IF NOT EXISTS sync_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbox_status ON sync_outbox (status, id);
   `);
 
   if (!getMeta('device_id')) setMeta('device_id', crypto.randomUUID());

@@ -35,6 +35,10 @@ export interface GatewayOptions {
   syncStatus?: () => Record<string, unknown>;
   /** Leitura do espelho local: nome da query → resultado (Fase 2+) */
   localQuery?: (name: string, params: URLSearchParams) => unknown | undefined;
+  /** Criação de pedido offline (Fase 3) */
+  localCreateOrder?: (body: unknown) =>
+    | { ok: true; orderId: string; orderNumber: string }
+    | { ok: false; status: number; error: string };
 }
 
 export interface GatewayHandle {
@@ -248,8 +252,35 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     res.end(JSON.stringify({ error: 'not_found' }));
   }
 
+  async function handleLocalOrder(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (!options.localCreateOrder) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+      return;
+    }
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8')) as unknown;
+      const result = options.localCreateOrder(body);
+      if (result.ok) {
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ order_id: result.orderId, order_number: result.orderNumber, offline: true }));
+      } else {
+        res.writeHead(result.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: result.error }));
+      }
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `body inválido: ${(err as Error).message}` }));
+    }
+  }
+
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
+
+    if (url === '/api/local/orders' && req.method === 'POST') {
+      void handleLocalOrder(req, res);
+      return;
+    }
 
     if (url.startsWith('/api/local/') || url === '/desktop/status') {
       handleLocal(req, res, url);
