@@ -3,10 +3,15 @@ import path from 'node:path';
 import { loadConfig } from './config';
 import { startAppServer, type AppServerHandle } from './server/boot';
 import { startGateway, type GatewayHandle } from './server/gateway';
+import { HealthMonitor } from './runtime/health-monitor';
+import { PullEngine } from './sync/pull';
+import { getDb, readMirrorTable } from './data/db';
 
 let appServer: AppServerHandle | null = null;
 let gateway: GatewayHandle | null = null;
 let mainWindow: BrowserWindow | null = null;
+let health: HealthMonitor | null = null;
+let pull: PullEngine | null = null;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -29,6 +34,7 @@ function createWindow(localOrigin: string) {
     autoHideMenuBar: true,
     backgroundColor: '#F5F6F8',
     title: 'Alinhafood',
+    icon: path.join(__dirname, '..', 'resources', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -36,7 +42,6 @@ function createWindow(localOrigin: string) {
     },
   });
 
-  // Links externos (WhatsApp, dashboards, etc.) abrem no navegador padrão
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith(localOrigin)) {
       void shell.openExternal(url);
@@ -67,8 +72,29 @@ async function setupAutoUpdater() {
 async function boot() {
   try {
     const config = loadConfig();
+    getDb(); // abre/migra o SQLite local cedo — falha aqui deve abortar o boot
+
+    health = new HealthMonitor(config);
+    pull = new PullEngine(config, health);
+
     appServer = await startAppServer(config);
-    gateway = await startGateway({ config, version: app.getVersion() });
+    gateway = await startGateway({
+      config,
+      version: app.getVersion(),
+      health,
+      isPackaged: app.isPackaged,
+      syncStatus: () => ({ ...pull!.status() }),
+      localQuery: (name) => {
+        // Fase 2: leitura crua do espelho por tabela (a Fase 3 traz queries nomeadas)
+        if (name === 'mirror') return undefined; // reservado
+        const known = readMirrorTable(name);
+        return known.length > 0 ? known : known; // sempre responde (pode ser [])
+      },
+    });
+
+    health.start();
+    pull.start();
+
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
     createWindow(localOrigin);
     void setupAutoUpdater();
@@ -94,6 +120,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  health?.stop();
+  pull?.stop();
   appServer?.stop();
   void gateway?.close();
 });

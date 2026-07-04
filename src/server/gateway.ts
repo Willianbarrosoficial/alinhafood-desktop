@@ -1,18 +1,19 @@
 import http from 'node:http';
 import { Client } from 'undici';
 import type { DesktopConfig } from '../config';
+import type { HealthMonitor } from '../runtime/health-monitor';
+import { saveAdminToken, clearAdminToken } from '../runtime/session-store';
 
 /**
  * Gateway local — porta pública do desktop (3737).
  *
- * Fase 1 (modo proxy-total):
- *   /api/*  → proxy reverso para a nuvem (cookies reescritos para a origem local)
- *   demais  → Next standalone interno (páginas, /_next, assets)
- *
- * Fases 2-3 vão inserir aqui o roteamento offline (handlers SQLite) por rota.
+ * Fase 2 (leitura offline):
+ *   /api/local/*        → status, SSE de modo, queries do espelho local
+ *   /api/auth/session   → proxy + captura do access_token (autentica o sync)
+ *   /api/*              → ONLINE: proxy nuvem | OFFLINE: 503 padronizado
+ *   demais              → Next standalone interno (páginas, /_next, assets)
  */
 
-/** Headers hop-by-hop que nunca são repassados em proxies (RFC 9110 §7.6.1) */
 const HOP_BY_HOP = new Set([
   'connection',
   'keep-alive',
@@ -25,9 +26,15 @@ const HOP_BY_HOP = new Set([
   'host',
 ]);
 
-interface GatewayOptions {
+export interface GatewayOptions {
   config: DesktopConfig;
   version: string;
+  health: HealthMonitor;
+  isPackaged: boolean;
+  /** Info extra para o /api/local/status (última sync, contagens do espelho) */
+  syncStatus?: () => Record<string, unknown>;
+  /** Leitura do espelho local: nome da query → resultado (Fase 2+) */
+  localQuery?: (name: string, params: URLSearchParams) => unknown | undefined;
 }
 
 export interface GatewayHandle {
@@ -35,20 +42,41 @@ export interface GatewayHandle {
   close: () => Promise<void>;
 }
 
-export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
-  const { config, version } = options;
-  const cloud = new URL(config.cloudUrl);
-  const cloudClient = new Client(cloud.origin, {
-    // SSE e respostas longas: sem timeout de corpo
-    bodyTimeout: 0,
-    headersTimeout: 30_000,
+function readBody(req: http.IncomingMessage, limit = 1024 * 1024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
   });
+}
+
+export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
+  const { config, version, health } = options;
+  const cloud = new URL(config.cloudUrl);
+  const cloudClient = new Client(cloud.origin, { bodyTimeout: 0, headersTimeout: 30_000 });
   const appServerClient = new Client(`http://127.0.0.1:${config.appServerPort}`, {
     bodyTimeout: 0,
     headersTimeout: 30_000,
   });
 
   const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
+  const sseClients = new Set<http.ServerResponse>();
+
+  health.on('change', (mode: string) => {
+    for (const res of sseClients) {
+      res.write(`event: mode\ndata: ${JSON.stringify({ mode })}\n\n`);
+    }
+  });
 
   function collectRequestHeaders(req: http.IncomingMessage, targetHost: string, rewriteOrigin: boolean) {
     const headers: Record<string, string | string[]> = {};
@@ -58,8 +86,6 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     }
     headers['host'] = targetHost;
     if (rewriteOrigin) {
-      // POSTs same-origin do app chegam com Origin/Referer locais; a nuvem
-      // valida como se fosse o site — reescrevemos para a origem da nuvem.
       if (headers['origin']) headers['origin'] = cloud.origin;
       if (typeof headers['referer'] === 'string') {
         headers['referer'] = headers['referer'].replace(localOrigin, cloud.origin);
@@ -69,7 +95,6 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     return headers;
   }
 
-  /** Set-Cookie da nuvem precisa "grudar" na origem local: remove Domain e Secure. */
   function rewriteSetCookie(cookies: string[]): string[] {
     return cookies.map((cookie) =>
       cookie
@@ -83,19 +108,32 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     );
   }
 
+  function offlineResponse(res: http.ServerResponse) {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: 'offline_unavailable',
+        message: 'Sem conexão com o servidor Alinhafood. Operando em modo offline.',
+      }),
+    );
+  }
+
   async function proxy(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     client: Client,
     targetHost: string,
     isCloud: boolean,
+    bufferedBody?: Buffer,
   ) {
     try {
       const upstream = await client.request({
         path: req.url ?? '/',
         method: (req.method ?? 'GET') as 'GET',
         headers: collectRequestHeaders(req, targetHost, isCloud),
-        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req,
+        body:
+          bufferedBody ??
+          (req.method === 'GET' || req.method === 'HEAD' ? undefined : req),
       });
 
       const outHeaders: Record<string, string | string[]> = {};
@@ -115,35 +153,121 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       res.writeHead(upstream.statusCode, outHeaders);
       upstream.body.pipe(res);
       upstream.body.on('error', () => res.destroy());
+      return upstream.statusCode;
     } catch (err) {
       if (res.headersSent) {
         res.destroy();
+        return null;
+      }
+      if (isCloud) {
+        offlineResponse(res);
+      } else {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'app_server_unavailable', message: 'Servidor local não respondeu.' }));
+      }
+      console.error(`[gateway] proxy ${isCloud ? 'cloud' : 'local'} ${req.method} ${req.url}:`, (err as Error).message);
+      return null;
+    }
+  }
+
+  /** Proxy do login/logout capturando o token p/ autenticar o sync engine. */
+  async function handleAuthSession(req: http.IncomingMessage, res: http.ServerResponse) {
+    const body = await readBody(req).catch(() => Buffer.alloc(0));
+    const status = await proxy(req, res, cloudClient, cloud.host, true, body);
+    if (status !== null && status < 300) {
+      if (req.method === 'POST') {
+        try {
+          const parsed = JSON.parse(body.toString('utf8')) as { access_token?: string };
+          if (parsed.access_token) {
+            saveAdminToken(parsed.access_token);
+            console.log('[gateway] sessão admin capturada para o sync');
+          }
+        } catch {
+          /* body não-JSON — ignora */
+        }
+      } else if (req.method === 'DELETE') {
+        clearAdminToken();
+        console.log('[gateway] sessão admin limpa');
+      }
+    }
+  }
+
+  function handleLocal(req: http.IncomingMessage, res: http.ServerResponse, url: string) {
+    if (url === '/api/local/status' || url === '/desktop/status') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          app: 'alinhafood-desktop',
+          version,
+          ...health.status(),
+          sync: options.syncStatus?.() ?? null,
+        }),
+      );
+      return;
+    }
+
+    if (url === '/api/local/events') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      res.write(`event: mode\ndata: ${JSON.stringify({ mode: health.status().mode })}\n\n`);
+      sseClients.add(res);
+      const keepalive = setInterval(() => res.write(': ping\n\n'), 25_000);
+      req.on('close', () => {
+        clearInterval(keepalive);
+        sseClients.delete(res);
+      });
+      return;
+    }
+
+    // Simulação de queda para QA — só em modo dev, nunca no app empacotado
+    if (!options.isPackaged && url.startsWith('/api/local/dev/mode/')) {
+      const target = url.split('/').pop();
+      health.force(target === 'offline' ? 'offline' : target === 'online' ? 'online' : null);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ forced: target }));
+      return;
+    }
+
+    const queryMatch = url.match(/^\/api\/local\/query\/([\w-]+)(?:\?(.*))?$/);
+    if (queryMatch && options.localQuery) {
+      const result = options.localQuery(queryMatch[1]!, new URLSearchParams(queryMatch[2] ?? ''));
+      if (result === undefined) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unknown_local_query' }));
         return;
       }
-      // Nuvem inacessível — contrato padronizado que a UI aprenderá a tratar
-      // (Fase 2+: aqui entra o fallback para os handlers offline locais).
-      res.writeHead(isCloud ? 503 : 502, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify(
-          isCloud
-            ? { error: 'offline_unavailable', message: 'Sem conexão com o servidor Alinhafood.' }
-            : { error: 'app_server_unavailable', message: 'Servidor local não respondeu.' },
-        ),
-      );
-      console.error(`[gateway] proxy ${isCloud ? 'cloud' : 'local'} ${req.method} ${req.url}:`, (err as Error).message);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return;
     }
+
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not_found' }));
   }
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
 
-    if (url === '/desktop/status') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ app: 'alinhafood-desktop', version, mode: 'online-proxy' }));
+    if (url.startsWith('/api/local/') || url === '/desktop/status') {
+      handleLocal(req, res, url);
+      return;
+    }
+
+    if (url.startsWith('/api/auth/session')) {
+      void handleAuthSession(req, res);
       return;
     }
 
     if (url.startsWith('/api/')) {
+      // Curto-circuito: nuvem marcada como fora → falha rápida com contrato
+      // padronizado (Fase 3 troca isto pelos handlers offline por rota).
+      if (!health.isOnline()) {
+        offlineResponse(res);
+        return;
+      }
       void proxy(req, res, cloudClient, cloud.host, true);
       return;
     }
@@ -153,15 +277,15 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    // Fase 1: somente a máquina local. Fase 4 muda para 0.0.0.0 (LAN).
+    // Fase 2: somente a máquina local. Fase 4 muda para 0.0.0.0 (LAN).
     server.listen(config.gatewayPort, '127.0.0.1', () => {
       server.removeListener('error', reject);
       console.log(`[gateway] escutando em ${localOrigin} → nuvem ${cloud.origin}`);
       resolve({
         server,
         close: () =>
-          new Promise<void>((res2) => {
-            server.close(() => res2());
+          new Promise<void>((done) => {
+            server.close(() => done());
             void cloudClient.close();
             void appServerClient.close();
           }),
