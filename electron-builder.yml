@@ -16,6 +16,7 @@ extraResources:
     to: desktop-config.json
 
 win:
+  icon: resources/icon.ico
   target:
     - target: nsis
       arch: [x64]
