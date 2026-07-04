@@ -46,6 +46,13 @@ export interface GatewayOptions {
     | undefined;
   /** JWKS pública do Supabase guardada no espelho (validação ES256 offline) */
   getJwks?: () => string | null;
+  /** Impressão local (Fase 3/4): agente C# consome jobs locais primeiro */
+  print?: {
+    expectedToken: () => string | null;
+    claim: () => unknown[];
+    update: (jobId: string, status: string, errorMessage?: string) => boolean;
+    pendingCount: () => number;
+  };
 }
 
 export interface GatewayHandle {
@@ -327,6 +334,60 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     if (writeMatch && req.method === 'POST') {
       void handleLocalWrite(req, res, writeMatch[1]!);
       return;
+    }
+
+    // Print agent: jobs locais têm prioridade; sem locais e online → nuvem.
+    // O agente C# não sabe a diferença — mesmo contrato nos dois caminhos.
+    if (url.startsWith('/api/print/jobs') && options.print) {
+      const auth = req.headers.authorization ?? '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+      const expected = options.print.expectedToken();
+
+      if (req.method === 'GET' && url === '/api/print/jobs') {
+        if (!token || !expected || token !== expected) {
+          // Token não confere localmente — deixa a nuvem decidir quando online
+          if (health.isOnline()) {
+            void proxy(req, res, cloudClient, cloud.host, true);
+          } else {
+            res.writeHead(401, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Token inválido' }));
+          }
+          return;
+        }
+        if (options.print.pendingCount() > 0 || !health.isOnline()) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ jobs: options.print.claim() }));
+          return;
+        }
+        void proxy(req, res, cloudClient, cloud.host, true);
+        return;
+      }
+
+      const patchMatch = url.match(/^\/api\/print\/jobs\/([\w-]+)$/);
+      if (patchMatch && req.method === 'PATCH' && token && expected && token === expected) {
+        void (async () => {
+          try {
+            const body = JSON.parse((await readBody(req)).toString('utf8')) as {
+              status?: string;
+              error_message?: string;
+            };
+            const isLocal = options.print!.update(patchMatch[1]!, body.status ?? 'failed', body.error_message);
+            if (isLocal) {
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ ok: true }));
+            } else if (health.isOnline()) {
+              await proxy(req, res, cloudClient, cloud.host, true, Buffer.from(JSON.stringify(body)));
+            } else {
+              res.writeHead(404, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'job não encontrado' }));
+            }
+          } catch {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'body inválido' }));
+          }
+        })();
+        return;
+      }
     }
 
     if (url.startsWith('/api/local/') || url === '/desktop/status') {

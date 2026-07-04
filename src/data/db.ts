@@ -72,6 +72,22 @@ export function getDb(): Database.Database {
       patch TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- Notinhas offline: mesmo contrato do print_jobs da nuvem — o print agent
+    -- C# consome via gateway (/api/print/jobs) sem saber a diferença.
+    CREATE TABLE IF NOT EXISTS print_jobs (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      dedupe_key TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      copies INTEGER NOT NULL DEFAULT 1,
+      payload TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs (status, created_at);
   `);
 
   // Migração aditiva: método HTTP do replay (PATCH p/ status, POST demais)

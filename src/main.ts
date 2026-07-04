@@ -15,6 +15,12 @@ import {
   markLocalOrdersPaid,
   type CreateLocalOrderBody,
 } from './data/orders-local';
+import {
+  expectedAgentToken,
+  claimLocalPrintJobs,
+  updateLocalPrintJob,
+  pendingLocalPrintJobs,
+} from './data/print-local';
 
 type MirrorRow = Record<string, unknown>;
 const byNumber = (key: string) => (rows: MirrorRow[]) =>
@@ -135,6 +141,12 @@ async function boot() {
       },
       localCreateOrder: (body) => createLocalOrder(body as CreateLocalOrderBody),
       getJwks: () => getMeta('jwks'),
+      print: {
+        expectedToken: expectedAgentToken,
+        claim: claimLocalPrintJobs,
+        update: updateLocalPrintJob,
+        pendingCount: pendingLocalPrintJobs,
+      },
     });
 
     health.start();

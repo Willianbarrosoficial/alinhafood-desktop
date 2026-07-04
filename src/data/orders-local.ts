@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { getDb, getMeta, setMeta, readMirrorTable } from './db';
+import { createLocalPrintJob } from './print-local';
 
 /**
  * Pedidos offline (Fase 3) — criação local + leitura de comandas.
@@ -156,6 +157,8 @@ export function createLocalOrder(body: CreateLocalOrderBody):
   })();
 
   console.log(`[offline] pedido ${orderNumber} criado (mesa ${checkout.table_number ?? '—'}, total ${total})`);
+  // Notinha da cozinha — mesma formatação e gatilho (order_accepted) do online
+  createLocalPrintJob(localView);
   return { ok: true, orderId, orderNumber };
 }
 
@@ -288,6 +291,19 @@ export function markLocalOrdersPaid(body: {
         new Date().toISOString(),
       );
   }
+  // Notinha de fechamento: uma por pedido pago, com as linhas de pagamento
+  // que a tela enviou (split/troco), no mesmo formato do online.
+  const payments = Array.isArray(options.payments) ? options.payments : null;
+  for (const id of ids) {
+    const order = mergedOrders().find((o) => o.id === id);
+    if (order) {
+      createLocalPrintJob(
+        { ...order, ...(payments ? { order_payments: payments } : {}) },
+        'table_closed',
+      );
+    }
+  }
+
   console.log(`[offline] ${ids.length} pedido(s) marcados como pagos (${needReplay.length} p/ replay)`);
   return { ok: true };
 }
