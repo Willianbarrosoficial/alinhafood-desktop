@@ -1,0 +1,27 @@
+{
+  "name": "alinhafood-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Alinhafood Desktop — operação de salão com contingência offline",
+  "main": "dist/main.js",
+  "author": "Alinhafood",
+  "scripts": {
+    "build:app": "node scripts/build-app-server.mjs",
+    "build:main": "node scripts/build-main.mjs",
+    "typecheck": "tsc --noEmit",
+    "dev": "npm run build:main && electron .",
+    "dist": "npm run build:main && electron-builder --win nsis",
+    "dist:dir": "npm run build:main && electron-builder --dir"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "undici": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}

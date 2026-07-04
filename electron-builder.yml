@@ -1,0 +1,36 @@
+appId: br.com.alinhafood.desktop
+productName: Alinhafood
+copyright: Copyright © Alinhafood
+
+directories:
+  output: dist-installer
+
+files:
+  - dist/**
+  - package.json
+
+extraResources:
+  - from: resources/app-server
+    to: app-server
+  - from: resources/desktop-config.json
+    to: desktop-config.json
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Sem code signing por enquanto — o SmartScreen exibirá aviso de editor
+  # desconhecido na primeira instalação (documentado no onboarding).
+  verifyUpdateCodeSignature: false
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  deleteAppDataOnUninstall: false
+  shortcutName: Alinhafood
+
+publish:
+  provider: github
+  owner: Willianbarrosoficial
+  repo: alinhafood-desktop

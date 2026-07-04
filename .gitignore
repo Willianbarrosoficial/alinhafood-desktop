@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-installer/
+resources/app-server/
+resources/desktop-config.json
+.env.desktop
+*.log
+.DS_Store
