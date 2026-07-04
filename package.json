@@ -10,7 +10,7 @@
     "build:main": "node scripts/build-main.mjs",
     "typecheck": "tsc --noEmit",
     "dev": "npm run build:main && electron .",
-    "dist": "npm run build:main && electron-builder --win nsis",
+    "dist": "npm run build:main && electron-builder --win nsis --x64",
     "dist:dir": "npm run build:main && electron-builder --dir"
   },
   "dependencies": {
