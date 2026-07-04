@@ -46,6 +46,14 @@ export interface GatewayOptions {
     | undefined;
   /** JWKS pública do Supabase guardada no espelho (validação ES256 offline) */
   getJwks?: () => string | null;
+  /** PIN de emergência — login offline (Fase 3) */
+  localAuth?: {
+    state: () => { hasPin: boolean; hasSession: boolean };
+    setupPin: (pin: string) => { ok: true } | { ok: false; error: string };
+    verifyPin: (pin: string) => boolean;
+    storedToken: () => string | null;
+    redirectPath: () => string | null;
+  };
   /** Impressão local (Fase 3/4): agente C# consome jobs locais primeiro */
   print?: {
     expectedToken: () => string | null;
@@ -210,7 +218,60 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     }
   }
 
+  /** Login por PIN: verifica, re-instala a sessão via /api/auth/session do
+   *  standalone local (reusa verifyAdminJwt + Set-Cookie) e relaia o cookie. */
+  async function handlePinLogin(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = options.localAuth;
+    if (!auth) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+      return;
+    }
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8')) as { pin?: string };
+      if (!body.pin || !auth.verifyPin(body.pin)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'PIN incorreto.' }));
+        return;
+      }
+      const token = auth.storedToken();
+      if (!token) {
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Sem sessão guardada. Faça login com internet uma vez.' }));
+        return;
+      }
+      // Deixa a rota real setar o cookie (valida ES256 via JWKS local, secure:false)
+      const upstream = await appServerClient.request({
+        path: '/api/auth/session',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ access_token: token }),
+      });
+      const setCookie = upstream.headers['set-cookie'];
+      await upstream.body.dump();
+      if (upstream.statusCode >= 300 || !setCookie) {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Falha ao restaurar a sessão local.' }));
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'set-cookie': setCookie,
+      });
+      res.end(JSON.stringify({ ok: true, redirect: auth.redirectPath() }));
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `body inválido: ${(err as Error).message}` }));
+    }
+  }
+
   function handleLocal(req: http.IncomingMessage, res: http.ServerResponse, url: string) {
+    if (url === '/api/local/auth/state' && options.localAuth) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ...options.localAuth.state(), mode: health.status().mode }));
+      return;
+    }
+
     if (url === '/api/local/jwks') {
       const jwks = options.getJwks?.();
       if (!jwks) {
@@ -327,6 +388,26 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
     if (url === '/api/local/orders' && req.method === 'POST') {
       void handleLocalOrder(req, res);
+      return;
+    }
+
+    if (url === '/api/local/auth/pin-login' && req.method === 'POST') {
+      void handlePinLogin(req, res);
+      return;
+    }
+
+    if (url === '/api/local/auth/setup-pin' && req.method === 'POST' && options.localAuth) {
+      void (async () => {
+        try {
+          const body = JSON.parse((await readBody(req)).toString('utf8')) as { pin?: string };
+          const result = options.localAuth!.setupPin(body.pin ?? '');
+          res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(result.ok ? { ok: true } : { error: result.error }));
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body inválido' }));
+        }
+      })();
       return;
     }
 

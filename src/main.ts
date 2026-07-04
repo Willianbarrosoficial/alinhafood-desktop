@@ -21,6 +21,7 @@ import {
   updateLocalPrintJob,
   pendingLocalPrintJobs,
 } from './data/print-local';
+import { localAuthState, setupPin, verifyPin, storedSessionToken, adminRedirectPath } from './runtime/local-auth';
 
 type MirrorRow = Record<string, unknown>;
 const byNumber = (key: string) => (rows: MirrorRow[]) =>
@@ -141,6 +142,13 @@ async function boot() {
       },
       localCreateOrder: (body) => createLocalOrder(body as CreateLocalOrderBody),
       getJwks: () => getMeta('jwks'),
+      localAuth: {
+        state: localAuthState,
+        setupPin,
+        verifyPin,
+        storedToken: storedSessionToken,
+        redirectPath: () => adminRedirectPath(config.adminPathSecret),
+      },
       print: {
         expectedToken: expectedAgentToken,
         claim: claimLocalPrintJobs,
