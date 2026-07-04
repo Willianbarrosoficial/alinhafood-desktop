@@ -61,7 +61,10 @@ function nextLocalOrderNumber(sessionId: string): string {
   const key = `local_order_seq:${sessionId}`;
   const next = Number(getMeta(key) ?? '0') + 1;
   setMeta(key, String(next));
-  return `F${String(next).padStart(3, '0')}`;
+  // Formato FF-000001: casa com orders_order_number_format_check da nuvem
+  // (regra '^[LETRAS]{2}-[0-9]{6}$'), é visualmente inconfundível como pedido
+  // offline e nunca colide com a sequência numérica normal do caixa.
+  return `FF-${String(next).padStart(6, '0')}`;
 }
 
 export function createLocalOrder(body: CreateLocalOrderBody):
