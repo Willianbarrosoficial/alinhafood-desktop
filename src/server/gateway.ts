@@ -52,7 +52,10 @@ export interface GatewayOptions {
   /** Print agent embutido: status + configuração de impressora (v0.3.0) */
   printerSetup?: {
     state: () => Promise<Record<string, unknown>>;
-    save: (body: { printer_name?: string; paper_width?: number }) => { ok: boolean; error?: string };
+    save: (body: {
+      printer_name?: string;
+      paper_width?: number;
+    }) => Promise<{ ok: boolean; error?: string }>;
   };
   /** PIN de emergência — login offline (Fase 3) */
   localAuth?: {
@@ -436,7 +439,7 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
             printer_name?: string;
             paper_width?: number;
           };
-          const result = options.printerSetup!.save(body);
+          const result = await options.printerSetup!.save(body);
           res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' });
           res.end(JSON.stringify(result.ok ? { ok: true } : { error: result.error }));
         } catch {

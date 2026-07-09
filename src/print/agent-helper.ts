@@ -2,8 +2,10 @@ import { app } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { resourcesDir } from '../config';
-import { readMirrorTable } from '../data/db';
+import { request } from 'undici';
+import { resourcesDir, type DesktopConfig } from '../config';
+import { getDb, getMeta, readMirrorTable } from '../data/db';
+import { getAdminToken } from '../runtime/session-store';
 
 /**
  * Print agent embutido (v0.3.0) — o lojista instala UM instalador só.
@@ -61,6 +63,49 @@ function mirrorAgentToken(): string | null {
   return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
+/**
+ * Garante que o restaurante TEM token de impressão: usa o do espelho ou, se
+ * nunca foi gerado, GERA sozinho na nuvem (POST /api/admin/impressora/token
+ * com a sessão do admin) — o lojista nunca copia código nenhum.
+ */
+async function ensureAgentToken(config: DesktopConfig): Promise<string | null> {
+  const existing = mirrorAgentToken();
+  if (existing) return existing;
+
+  const adminToken = getAdminToken();
+  const restaurantId = getMeta('restaurant_id');
+  if (!adminToken || !restaurantId) return null;
+
+  try {
+    const res = await request(
+      `${config.cloudUrl.replace(/\/$/, '')}/api/admin/impressora/token`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ restaurant_id: restaurantId }),
+        headersTimeout: 15_000,
+        bodyTimeout: 15_000,
+      },
+    );
+    const body = (await res.body.json().catch(() => null)) as { token?: string } | null;
+    if (res.statusCode !== 200 || !body?.token) return null;
+    // Atualiza o espelho na hora (o próximo pull confirma da nuvem)
+    getDb()
+      .prepare(
+        "UPDATE mirror_rows SET data = json_set(data, '$.print_agent_token', ?) WHERE table_name = 'store_settings'",
+      )
+      .run(body.token);
+    console.log('[print-helper] token de impressão gerado automaticamente');
+    return body.token;
+  } catch (err) {
+    console.error('[print-helper] falha ao gerar token:', (err as Error).message);
+    return null;
+  }
+}
+
 export function readHelperConfig(): AgentJson | null {
   try {
     return JSON.parse(fs.readFileSync(configPath(), 'utf8')) as AgentJson;
@@ -69,13 +114,16 @@ export function readHelperConfig(): AgentJson | null {
   }
 }
 
-/** Escreve/atualiza o agent.json. Token SEMPRE re-injetado do espelho. */
-export function writeHelperConfig(input: HelperConfigInput): { ok: boolean; error?: string } {
-  const token = mirrorAgentToken();
+/** Escreve/atualiza o agent.json. Token injetado do espelho ou gerado na nuvem. */
+export async function writeHelperConfig(
+  input: HelperConfigInput,
+  config: DesktopConfig,
+): Promise<{ ok: boolean; error?: string }> {
+  const token = await ensureAgentToken(config);
   if (!token) {
     return {
       ok: false,
-      error: 'Token de impressão ainda não sincronizado — abra o app com internet uma vez.',
+      error: 'Não foi possível ativar a impressão — verifique a conexão e tente de novo.',
     };
   }
   const previous = readHelperConfig();
@@ -155,8 +203,11 @@ export function stopHelper(): void {
 }
 
 /** Aplica config nova e (re)inicia o helper. */
-export function configureHelper(input: HelperConfigInput): { ok: boolean; error?: string } {
-  const result = writeHelperConfig(input);
+export async function configureHelper(
+  input: HelperConfigInput,
+  config: DesktopConfig,
+): Promise<{ ok: boolean; error?: string }> {
+  const result = await writeHelperConfig(input, config);
   if (!result.ok) return result;
   restarts = 0;
   stopHelper();

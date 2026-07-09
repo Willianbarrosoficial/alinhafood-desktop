@@ -191,7 +191,10 @@ async function boot() {
           return { ...helperStatus(), printers };
         },
         save: (body) =>
-          configureHelper({ printerName: body.printer_name, paperWidth: body.paper_width }),
+          configureHelper(
+            { printerName: body.printer_name, paperWidth: body.paper_width },
+            config,
+          ),
       },
     });
 
