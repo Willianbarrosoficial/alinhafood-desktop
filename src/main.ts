@@ -8,6 +8,7 @@ import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta } from './data/db';
 import { serveImage, localImageUrl, syncImages } from './data/image-cache';
 import { backupIfDue, backupBeforeUpdate } from './data/backup';
+import { startHelper, stopHelper, helperStatus, configureHelper } from './print/agent-helper';
 import {
   createLocalOrder,
   listTableActiveOrders,
@@ -178,6 +179,20 @@ async function boot() {
         update: updateLocalPrintJob,
         pendingCount: pendingLocalPrintJobs,
       },
+      printerSetup: {
+        state: async () => {
+          const printers = mainWindow
+            ? (await mainWindow.webContents.getPrintersAsync()).map((p) => ({
+                name: p.name,
+                displayName: p.displayName,
+                isDefault: p.isDefault ?? false,
+              }))
+            : [];
+          return { ...helperStatus(), printers };
+        },
+        save: (body) =>
+          configureHelper({ printerName: body.printer_name, paperWidth: body.paper_width }),
+      },
     });
 
     health.start();
@@ -187,6 +202,8 @@ async function boot() {
     void syncImages();
     // Backup diário do banco local (rotativo)
     void backupIfDue();
+    // Print agent embutido: sobe se já houver impressora configurada (win32)
+    startHelper();
 
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
     createWindow(localOrigin);
@@ -215,6 +232,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   health?.stop();
   pull?.stop();
+  stopHelper();
   appServer?.stop();
   void gateway?.close();
 });

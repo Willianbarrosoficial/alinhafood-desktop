@@ -49,6 +49,11 @@ export interface GatewayOptions {
   getJwks?: () => string | null;
   /** Serve imagem do cardápio do cache local (Fase 3 — imagens offline) */
   serveImage?: (url: string) => Promise<{ path: string; contentType: string } | null>;
+  /** Print agent embutido: status + configuração de impressora (v0.3.0) */
+  printerSetup?: {
+    state: () => Promise<Record<string, unknown>>;
+    save: (body: { printer_name?: string; paper_width?: number }) => { ok: boolean; error?: string };
+  };
   /** PIN de emergência — login offline (Fase 3) */
   localAuth?: {
     state: () => { hasPin: boolean; hasSession: boolean };
@@ -407,6 +412,38 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
     if (url === '/api/local/auth/pin-login' && req.method === 'POST') {
       void handlePinLogin(req, res);
+      return;
+    }
+
+    if (url === '/api/local/printer/state' && req.method === 'GET' && options.printerSetup) {
+      void (async () => {
+        try {
+          const state = await options.printerSetup!.state();
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(state));
+        } catch (err) {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: (err as Error).message }));
+        }
+      })();
+      return;
+    }
+
+    if (url === '/api/local/printer/config' && req.method === 'POST' && options.printerSetup) {
+      void (async () => {
+        try {
+          const body = JSON.parse((await readBody(req)).toString('utf8')) as {
+            printer_name?: string;
+            paper_width?: number;
+          };
+          const result = options.printerSetup!.save(body);
+          res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(result.ok ? { ok: true } : { error: result.error }));
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body inválido' }));
+        }
+      })();
       return;
     }
 

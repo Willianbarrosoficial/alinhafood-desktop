@@ -6,3 +6,4 @@ resources/desktop-config.json
 .env.desktop
 *.log
 .DS_Store
+resources/print-agent/
