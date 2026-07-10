@@ -68,7 +68,9 @@ console.log(`[build-app] rodando next build em ${webRoot} ...`);
 execSync('npm run build', {
   cwd: webRoot,
   stdio: 'inherit',
-  env: { ...process.env, ...desktopEnv },
+  // ALINHAFOOD_DESKTOP_BUILD=1 desliga a otimização de imagem (sharp) — o
+  // standalone é compilado aqui no Mac mas roda no Windows.
+  env: { ...process.env, ...desktopEnv, ALINHAFOOD_DESKTOP_BUILD: '1' },
 });
 
 const standaloneDir = path.join(webRoot, '.next', 'standalone');

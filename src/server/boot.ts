@@ -1,8 +1,24 @@
-import { utilityProcess, type UtilityProcess } from 'electron';
+import { app, utilityProcess, type UtilityProcess } from 'electron';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { appServerDir, type DesktopConfig } from '../config';
+
+/** Últimas linhas do app-server, para diagnosticar falha de boot no Windows. */
+const recentLog: string[] = [];
+function pushLog(line: string): void {
+  const clean = line.trimEnd();
+  if (!clean) return;
+  recentLog.push(clean);
+  if (recentLog.length > 40) recentLog.shift();
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'app-server.log'), `${clean}\n`);
+  } catch {
+    /* log é best-effort */
+  }
+}
 
 /**
  * Sobe o Next standalone (build da Alinhafood 01) como processo utilitário.
@@ -82,11 +98,17 @@ export async function startAppServer(config: DesktopConfig): Promise<AppServerHa
     },
   });
 
-  child.stdout?.on('data', (data: Buffer) => console.log(`[app-server] ${String(data).trimEnd()}`));
-  child.stderr?.on('data', (data: Buffer) => console.error(`[app-server] ${String(data).trimEnd()}`));
-  child.on('exit', (code) => console.log(`[app-server] encerrou com código ${code}`));
+  child.stdout?.on('data', (data: Buffer) => pushLog(`[out] ${String(data)}`));
+  child.stderr?.on('data', (data: Buffer) => pushLog(`[err] ${String(data)}`));
+  child.on('exit', (code) => pushLog(`[app-server] encerrou com código ${code}`));
 
-  await waitForHttp(config.appServerPort, 30_000);
+  try {
+    await waitForHttp(config.appServerPort, 60_000);
+  } catch (err) {
+    // Surface o motivo real do crash (útil no primeiro boot em Windows)
+    const tail = recentLog.slice(-12).join('\n');
+    throw new Error(`${(err as Error).message}\n\nÚltimas mensagens do servidor:\n${tail || '(sem saída)'}`);
+  }
   console.log(`[app-server] pronto em http://127.0.0.1:${config.appServerPort}`);
 
   return {
