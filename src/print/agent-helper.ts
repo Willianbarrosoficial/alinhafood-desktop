@@ -1,11 +1,28 @@
 import { app } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { request } from 'undici';
 import { resourcesDir, type DesktopConfig } from '../config';
-import { getDb, getMeta, readMirrorTable } from '../data/db';
+import { getDb, getMeta, setMeta, readMirrorTable } from '../data/db';
 import { getAdminToken } from '../runtime/session-store';
+
+/**
+ * Token INTERNO do helper — segredo local por instalação (nunca sai do PC).
+ * O helper embutido autentica no gateway com ISTO, não com o token de nuvem do
+ * restaurante. Assim, se o restaurante do PC mudar, o gateway continua servindo
+ * o restaurante ATUAL (usa o token de nuvem do espelho para falar com a nuvem),
+ * e o helper nunca imprime pedido de outro restaurante.
+ */
+export function helperInternalToken(): string {
+  let token = getMeta('helper_internal_token');
+  if (!token) {
+    token = crypto.randomUUID();
+    setMeta('helper_internal_token', token);
+  }
+  return token;
+}
 
 /**
  * Print agent embutido (v0.3.0) — o lojista instala UM instalador só.
@@ -114,18 +131,21 @@ export function readHelperConfig(): AgentJson | null {
   }
 }
 
-/** Escreve/atualiza o agent.json. Token injetado do espelho ou gerado na nuvem. */
+/** Escreve/atualiza o agent.json. O helper autentica com o token INTERNO local;
+ *  garantimos que o restaurante tem token de nuvem (gerado se preciso) para o
+ *  gateway conseguir buscar os pedidos de delivery, mas o helper nunca o vê. */
 export async function writeHelperConfig(
   input: HelperConfigInput,
   config: DesktopConfig,
 ): Promise<{ ok: boolean; error?: string }> {
-  const token = await ensureAgentToken(config);
-  if (!token) {
+  const cloudToken = await ensureAgentToken(config);
+  if (!cloudToken) {
     return {
       ok: false,
       error: 'Não foi possível ativar a impressão — verifique a conexão e tente de novo.',
     };
   }
+  const token = helperInternalToken();
   const previous = readHelperConfig();
   const next: AgentJson = {
     agentToken: token,

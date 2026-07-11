@@ -56,6 +56,7 @@ export interface GatewayOptions {
       printer_name?: string;
       paper_width?: number;
     }) => Promise<{ ok: boolean; error?: string }>;
+    test: () => void;
   };
   /** PIN de emergência — login offline (Fase 3) */
   localAuth?: {
@@ -67,9 +68,12 @@ export interface GatewayOptions {
     saveSnapshot: (json: string) => void;
     snapshot: () => string | null;
   };
-  /** Impressão local (Fase 3/4): agente C# consome jobs locais primeiro */
+  /** Impressão local (Fase 3/4): agente embutido consome jobs locais primeiro */
   print?: {
+    /** Token INTERNO do helper (segredo local) — o que o helper envia. */
     expectedToken: () => string | null;
+    /** Token de nuvem do restaurante ATUAL — usado nas idas à nuvem. */
+    cloudToken: () => string | null;
     claim: () => unknown[];
     update: (jobId: string, status: string, errorMessage?: string) => boolean;
     pendingCount: () => number;
@@ -117,7 +121,12 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     }
   });
 
-  function collectRequestHeaders(req: http.IncomingMessage, targetHost: string, rewriteOrigin: boolean) {
+  function collectRequestHeaders(
+    req: http.IncomingMessage,
+    targetHost: string,
+    rewriteOrigin: boolean,
+    authOverride?: string,
+  ) {
     const headers: Record<string, string | string[]> = {};
     for (const [name, value] of Object.entries(req.headers)) {
       if (value === undefined || HOP_BY_HOP.has(name)) continue;
@@ -131,6 +140,9 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       }
       headers['x-alinhafood-desktop'] = version;
     }
+    // Reescreve a autenticação (impressão: NUNCA repassar o token do helper à
+    // nuvem — usar sempre o token ATUAL do restaurante, evitando cross-tenant).
+    if (authOverride) headers['authorization'] = `Bearer ${authOverride}`;
     return headers;
   }
 
@@ -164,12 +176,13 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     targetHost: string,
     isCloud: boolean,
     bufferedBody?: Buffer,
+    authOverride?: string,
   ) {
     try {
       const upstream = await client.request({
         path: req.url ?? '/',
         method: (req.method ?? 'GET') as 'GET',
-        headers: collectRequestHeaders(req, targetHost, isCloud),
+        headers: collectRequestHeaders(req, targetHost, isCloud, authOverride),
         body:
           bufferedBody ??
           (req.method === 'GET' || req.method === 'HEAD' ? undefined : req),
@@ -432,6 +445,13 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       return;
     }
 
+    if (url === '/api/local/printer/test' && req.method === 'POST' && options.printerSetup?.test) {
+      options.printerSetup.test();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     if (url === '/api/local/printer/config' && req.method === 'POST' && options.printerSetup) {
       void (async () => {
         try {
@@ -487,22 +507,24 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       return;
     }
 
-    // Print agent: jobs locais têm prioridade; sem locais e online → nuvem.
-    // O agente C# não sabe a diferença — mesmo contrato nos dois caminhos.
+    // Print agent embutido: jobs locais têm prioridade; sem locais e online →
+    // nuvem. SEGURANÇA multi-tenant: o helper autentica com o token INTERNO
+    // (segredo local); toda ida à nuvem usa o token ATUAL do restaurante
+    // (cloudToken), NUNCA o que o helper mandou — assim é impossível imprimir
+    // pedido de outro restaurante mesmo com token defasado.
     if (url.startsWith('/api/print/jobs') && options.print) {
       const auth = req.headers.authorization ?? '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
-      const expected = options.print.expectedToken();
+      const internal = options.print.expectedToken();
+      const cloudToken = options.print.cloudToken();
+      // Aceita o token interno OU o token de nuvem atual (compat com um agente
+      // standalone apontado ao localhost). Qualquer outro → recusa.
+      const authorized = !!token && (token === internal || (!!cloudToken && token === cloudToken));
 
       if (req.method === 'GET' && url === '/api/print/jobs') {
-        if (!token || !expected || token !== expected) {
-          // Token não confere localmente — deixa a nuvem decidir quando online
-          if (health.isOnline()) {
-            void proxy(req, res, cloudClient, cloud.host, true);
-          } else {
-            res.writeHead(401, { 'content-type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Token inválido' }));
-          }
+        if (!authorized) {
+          res.writeHead(401, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Token inválido' }));
           return;
         }
         if (options.print.pendingCount() > 0 || !health.isOnline()) {
@@ -510,12 +532,19 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
           res.end(JSON.stringify({ jobs: options.print.claim() }));
           return;
         }
-        void proxy(req, res, cloudClient, cloud.host, true);
+        // Online, sem jobs locais: busca delivery na nuvem com o token do
+        // restaurante ATUAL (reescrito), nunca o token do helper.
+        if (cloudToken) {
+          void proxy(req, res, cloudClient, cloud.host, true, undefined, cloudToken);
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ jobs: [] }));
+        }
         return;
       }
 
       const patchMatch = url.match(/^\/api\/print\/jobs\/([\w-]+)$/);
-      if (patchMatch && req.method === 'PATCH' && token && expected && token === expected) {
+      if (patchMatch && req.method === 'PATCH' && authorized) {
         void (async () => {
           try {
             const body = JSON.parse((await readBody(req)).toString('utf8')) as {
@@ -526,8 +555,8 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
             if (isLocal) {
               res.writeHead(200, { 'content-type': 'application/json' });
               res.end(JSON.stringify({ ok: true }));
-            } else if (health.isOnline()) {
-              await proxy(req, res, cloudClient, cloud.host, true, Buffer.from(JSON.stringify(body)));
+            } else if (health.isOnline() && cloudToken) {
+              await proxy(req, res, cloudClient, cloud.host, true, Buffer.from(JSON.stringify(body)), cloudToken);
             } else {
               res.writeHead(404, { 'content-type': 'application/json' });
               res.end(JSON.stringify({ error: 'job não encontrado' }));

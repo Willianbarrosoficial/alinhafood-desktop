@@ -9,7 +9,8 @@ import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta, setMeta } from './data/db';
 import { serveImage, localImageUrl, syncImages } from './data/image-cache';
 import { backupIfDue, backupBeforeUpdate } from './data/backup';
-import { startHelper, stopHelper, helperStatus, configureHelper } from './print/agent-helper';
+import { startHelper, stopHelper, helperStatus, configureHelper, helperInternalToken } from './print/agent-helper';
+import { classifyPrinters } from './print/printer-utils';
 import {
   createLocalOrder,
   listTableActiveOrders,
@@ -24,6 +25,7 @@ import {
   claimLocalPrintJobs,
   updateLocalPrintJob,
   pendingLocalPrintJobs,
+  createTestPrintJob,
 } from './data/print-local';
 import { localAuthState, setupPin, verifyPin, storedSessionToken, adminRedirectPath, sessionSnapshot } from './runtime/local-auth';
 import { saveSessionSnapshot } from './runtime/session-store';
@@ -249,20 +251,25 @@ async function boot() {
         snapshot: sessionSnapshot,
       },
       print: {
-        expectedToken: expectedAgentToken,
+        // Helper autentica com o token INTERNO; a nuvem é acessada com o token
+        // de nuvem do restaurante ATUAL (expectedAgentToken lê do espelho).
+        expectedToken: helperInternalToken,
+        cloudToken: expectedAgentToken,
         claim: claimLocalPrintJobs,
         update: updateLocalPrintJob,
         pendingCount: pendingLocalPrintJobs,
       },
       printerSetup: {
         state: async () => {
-          const printers = mainWindow
-            ? (await mainWindow.webContents.getPrintersAsync()).map((p) => ({
-                name: p.name,
-                displayName: p.displayName,
-                isDefault: p.isDefault ?? false,
-              }))
-            : [];
+          const raw = mainWindow ? await mainWindow.webContents.getPrintersAsync() : [];
+          const printers = classifyPrinters(
+            raw.map((p) => ({
+              name: p.name,
+              displayName: p.displayName,
+              description: p.description,
+              isDefault: p.isDefault,
+            })),
+          );
           return { ...helperStatus(), printers };
         },
         save: (body) =>
@@ -270,6 +277,7 @@ async function boot() {
             { printerName: body.printer_name, paperWidth: body.paper_width },
             config,
           ),
+        test: createTestPrintJob,
       },
     });
 

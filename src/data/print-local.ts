@@ -141,6 +141,44 @@ export function updateLocalPrintJob(jobId: string, status: string, errorMessage?
   return result.changes > 0;
 }
 
+/** Cria um job de teste (texto simples) para o usuário validar a impressora. */
+export function createTestPrintJob(): void {
+  const restaurantName = mirrorRestaurantName();
+  const width = Number(mirrorSettings()?.paper_width_mm ?? 58) >= 80 ? 48 : 32;
+  const center = (s: string) => {
+    const pad = Math.max(0, Math.floor((width - s.length) / 2));
+    return ' '.repeat(pad) + s;
+  };
+  const line = '='.repeat(width);
+  const now = new Date();
+  const receipt = [
+    center(restaurantName.toUpperCase()),
+    line,
+    center('TESTE DE IMPRESSAO'),
+    line,
+    center('Alinhafood Desktop'),
+    center(`${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR')}`),
+    '',
+    center('Se voce esta lendo isto,'),
+    center('a impressora esta funcionando!'),
+    '',
+    '',
+  ].join('\n');
+
+  getDb()
+    .prepare(
+      `INSERT INTO print_jobs (id, order_id, dedupe_key, status, copies, payload, created_at)
+       VALUES (?, 'test', ?, 'pending', 1, ?, ?)`,
+    )
+    .run(
+      crypto.randomUUID(),
+      `test:${now.getTime()}`,
+      JSON.stringify({ receipt_text: receipt, order_id: 'test', restaurant_name: restaurantName, total: 0, customer_name: 'Teste', order_type: 'teste' }),
+      now.toISOString(),
+    );
+  console.log('[print] cupom de teste enfileirado');
+}
+
 export function pendingLocalPrintJobs(): number {
   const row = getDb()
     .prepare("SELECT COUNT(*) as n FROM print_jobs WHERE status IN ('pending','processing')")
