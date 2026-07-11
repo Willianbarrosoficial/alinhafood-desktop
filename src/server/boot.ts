@@ -1,4 +1,5 @@
-import { app, utilityProcess, type UtilityProcess } from 'electron';
+import { app } from 'electron';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -26,7 +27,7 @@ function pushLog(line: string): void {
  */
 
 export interface AppServerHandle {
-  child: UtilityProcess;
+  child: ChildProcess;
   stop: () => void;
 }
 
@@ -76,10 +77,20 @@ export async function startAppServer(config: DesktopConfig): Promise<AppServerHa
     );
   }
 
-  const child = utilityProcess.fork(serverJs, [], {
+  // Roda o standalone como Node PURO (o binário do Electron com
+  // ELECTRON_RUN_AS_NODE vira um Node comum — técnica do VS Code).
+  // Não usar utilityProcess.fork: no Windows ele falha ao abrir portas
+  // ("listen UNKNOWN errno -4094") — visto no primeiro teste em campo.
+  const child = spawn(process.execPath, [serverJs], {
     cwd: path.dirname(serverJs),
-    stdio: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     env: {
+      // HERDA o ambiente do sistema — obrigatório: no Windows, sem SystemRoot
+      // e afins o Winsock nem inicializa ("listen UNKNOWN errno -4094", visto
+      // em campo). As nossas variáveis entram por cima.
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
       NODE_ENV: 'production',
       PORT: String(config.appServerPort),
       HOSTNAME: '127.0.0.1',
@@ -100,6 +111,7 @@ export async function startAppServer(config: DesktopConfig): Promise<AppServerHa
 
   child.stdout?.on('data', (data: Buffer) => pushLog(`[out] ${String(data)}`));
   child.stderr?.on('data', (data: Buffer) => pushLog(`[err] ${String(data)}`));
+  child.on('error', (err) => pushLog(`[app-server] falha ao iniciar processo: ${err.message}`));
   child.on('exit', (code) => pushLog(`[app-server] encerrou com código ${code}`));
 
   try {
