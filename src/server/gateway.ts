@@ -34,6 +34,11 @@ export interface GatewayOptions {
   isPackaged: boolean;
   /** Info extra para o /api/local/status (última sync, contagens do espelho) */
   syncStatus?: () => Record<string, unknown>;
+  /** Atualização baixada aguardando reinício (faixa "Reiniciar para atualizar") */
+  update?: {
+    pending: () => { version: string } | null;
+    install: () => void;
+  };
   /** Leitura do espelho local: nome da query → resultado (Fase 2+) */
   localQuery?: (name: string, params: URLSearchParams) => unknown | undefined;
   /** Criação de pedido offline (Fase 3) */
@@ -327,6 +332,7 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
           version,
           ...health.status(),
           sync: options.syncStatus?.() ?? null,
+          update: options.update?.pending() ?? null,
         }),
       );
       return;
@@ -428,6 +434,13 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
     if (url === '/api/local/auth/pin-login' && req.method === 'POST') {
       void handlePinLogin(req, res);
+      return;
+    }
+
+    if (url === '/api/local/update/install' && req.method === 'POST' && options.update) {
+      options.update.install();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
       return;
     }
 

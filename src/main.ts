@@ -171,15 +171,28 @@ function createWindow(localOrigin: string) {
   void mainWindow.loadURL(`${localOrigin}/login`);
 }
 
+// Estado da atualização baixada — exposto ao gateway para a faixa
+// "Reiniciar para atualizar" (padrão VS Code/Claude), com a versão.
+let pendingUpdate: { version: string } | null = null;
+let installUpdateFn: (() => void) | null = null;
+
 async function setupAutoUpdater() {
   if (!app.isPackaged) return;
   const { autoUpdater } = await import('electron-updater');
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  // Snapshot de segurança antes de aplicar uma atualização (rollback possível)
-  autoUpdater.on('update-downloaded', () => {
+  // NÃO instala sozinho no quit: mostra "Reiniciar para atualizar" e deixa o
+  // usuário aplicar quando quiser (o UAC aparece uma vez, no clique dele).
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on('update-downloaded', (info) => {
     void backupBeforeUpdate();
+    pendingUpdate = { version: info.version };
+    if (tray) tray.setToolTip(`Alinhafood — atualização ${info.version} pronta`);
+    console.log(`[updater] atualização ${info.version} baixada — aguardando reinício`);
   });
+  installUpdateFn = () => {
+    void backupBeforeUpdate();
+    autoUpdater.quitAndInstall(false, true);
+  };
   const check = () => autoUpdater.checkForUpdatesAndNotify().catch((err) => {
     console.error('[updater] falha ao checar atualização:', err.message);
   });
@@ -217,6 +230,10 @@ async function boot() {
       health,
       isPackaged: app.isPackaged,
       syncStatus: () => ({ ...pull!.status() }),
+      update: {
+        pending: () => pendingUpdate,
+        install: () => installUpdateFn?.(),
+      },
       localWrite: (action, body) => {
         if (action === 'update-status') {
           return updateLocalOrderStatus(body as Parameters<typeof updateLocalOrderStatus>[0]);

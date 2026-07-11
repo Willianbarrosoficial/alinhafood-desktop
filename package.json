@@ -1,6 +1,6 @@
 {
   "name": "alinhafood-desktop",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Alinhafood Desktop — operação de salão com contingência offline",
   "main": "dist/main.js",
