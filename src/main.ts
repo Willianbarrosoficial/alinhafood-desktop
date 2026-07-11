@@ -3,6 +3,7 @@ import path from 'node:path';
 import { loadConfig } from './config';
 import { startAppServer, type AppServerHandle } from './server/boot';
 import { startGateway, type GatewayHandle } from './server/gateway';
+import { findBindablePort } from './server/ports';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
 import { getDb, readMirrorTable, getMeta } from './data/db';
@@ -129,6 +130,21 @@ async function boot() {
   try {
     const config = loadConfig();
     getDb(); // abre/migra o SQLite local cedo — falha aqui deve abortar o boot
+
+    // Resolve portas REALMENTE bindáveis antes de subir nada. No Windows,
+    // Hyper-V/WSL/Docker reservam faixas de portas por boot; sem isto o
+    // servidor interno falhava intermitentemente com "listen UNKNOWN -4094".
+    // Gateway tenta 3737 primeiro (o print agent embutido espera essa porta);
+    // o app-server interno pode ser qualquer porta livre.
+    config.gatewayPort = await findBindablePort([config.gatewayPort, 3737, 3838, 3939, 4040]);
+    config.appServerPort = await findBindablePort([
+      config.appServerPort,
+      3738,
+      3739,
+      3740,
+      4141,
+    ]);
+    console.log(`[boot] portas: gateway=${config.gatewayPort} app-server=${config.appServerPort}`);
 
     health = new HealthMonitor(config);
     pull = new PullEngine(config, health);
