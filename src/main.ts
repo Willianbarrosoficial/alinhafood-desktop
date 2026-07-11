@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from 'electron';
+import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } from 'electron';
 import path from 'node:path';
 import { loadConfig } from './config';
 import { startAppServer, type AppServerHandle } from './server/boot';
@@ -6,7 +6,7 @@ import { startGateway, type GatewayHandle } from './server/gateway';
 import { findBindablePort } from './server/ports';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
-import { getDb, readMirrorTable, getMeta } from './data/db';
+import { getDb, readMirrorTable, getMeta, setMeta } from './data/db';
 import { serveImage, localImageUrl, syncImages } from './data/image-cache';
 import { backupIfDue, backupBeforeUpdate } from './data/backup';
 import { startHelper, stopHelper, helperStatus, configureHelper } from './print/agent-helper';
@@ -65,6 +65,65 @@ let gateway: GatewayHandle | null = null;
 let mainWindow: BrowserWindow | null = null;
 let health: HealthMonitor | null = null;
 let pull: PullEngine | null = null;
+let tray: Tray | null = null;
+
+/** Liga o "iniciar com o Windows" por padrão na 1ª execução (depois o usuário
+ *  controla pela bandeja — não re-liga se ele desligar). */
+function ensureAutostartDefault() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  if (getMeta('autostart_configured')) return;
+  app.setLoginItemSettings({ openAtLogin: true });
+  setMeta('autostart_configured', '1');
+}
+
+function buildTrayMenu(localOrigin: string) {
+  const openAtLogin =
+    process.platform === 'win32' ? app.getLoginItemSettings().openAtLogin : false;
+  return Menu.buildFromTemplate([
+    {
+      label: 'Abrir Alinhafood',
+      click: () => {
+        if (mainWindow) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        } else {
+          createWindow(localOrigin);
+        }
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'Iniciar com o Windows',
+      type: 'checkbox',
+      checked: openAtLogin,
+      visible: process.platform === 'win32',
+      click: (item) => {
+        app.setLoginItemSettings({ openAtLogin: item.checked });
+      },
+    },
+    { type: 'separator' },
+    { label: `Versão ${app.getVersion()}`, enabled: false },
+    { label: 'Sair', click: () => app.quit() },
+  ]);
+}
+
+function setupTray(localOrigin: string) {
+  if (tray) return;
+  const iconPath = path.join(__dirname, '..', 'resources', 'icon.ico');
+  const image = nativeImage.createFromPath(iconPath);
+  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray.setToolTip('Alinhafood');
+  tray.setContextMenu(buildTrayMenu(localOrigin));
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow(localOrigin);
+    }
+  });
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -226,6 +285,8 @@ async function boot() {
 
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
     createWindow(localOrigin);
+    ensureAutostartDefault();
+    setupTray(localOrigin);
     void setupAutoUpdater();
   } catch (err) {
     dialog.showErrorBox(

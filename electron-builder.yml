@@ -27,11 +27,19 @@ win:
   verifyUpdateCodeSignature: false
 
 nsis:
-  oneClick: true
-  perMachine: false
-  allowToChangeInstallationDirectory: false
+  # Instalador ASSISTIDO (não one-click): assistente passo a passo, escolha de
+  # pasta/disco, entra em "Arquivos de Programas", aparece em "Adicionar/Remover
+  # programas" — um programa instalado de verdade, não portátil.
+  oneClick: false
+  perMachine: true
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
   deleteAppDataOnUninstall: false
   shortcutName: Alinhafood
+  uninstallDisplayName: Alinhafood Desktop
 
 publish:
   provider: github
