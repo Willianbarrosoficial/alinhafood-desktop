@@ -18,7 +18,33 @@ type ReceiptLib = {
     restaurantName: string,
     settings: Record<string, unknown>,
   ) => string;
+  /** Comanda de produção — só os itens do setor, sem preços. */
+  buildSectorReceiptText?: (
+    order: Record<string, unknown>,
+    restaurantName: string,
+    settings: Record<string, unknown>,
+    sector: { name: string; paper_width_mm?: number | null },
+    items: Array<Record<string, unknown>>,
+  ) => string;
 };
+
+type MirrorSector = {
+  id: string;
+  slug: string;
+  name: string;
+  enabled?: boolean | number | null;
+  paper_width_mm?: number | null;
+  copies?: number | null;
+  print_full_order?: boolean | number | null;
+  fire_on?: string | null;
+  is_default?: boolean | number | null;
+  sort_order?: number | null;
+};
+
+/** SQLite guarda booleano como 0/1; o espelho da nuvem manda true/false. */
+function isTrue(v: unknown): boolean {
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
 
 let receiptLib: ReceiptLib | null = null;
 function getReceiptLib(): ReceiptLib | null {
@@ -47,6 +73,34 @@ export function expectedAgentToken(): string | null {
   return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
+/**
+ * Setores habilitados espelhados da nuvem, na ordem de exibição.
+ * Vazio significa "loja não usa setores" OU "o espelho ainda não trouxe a
+ * tabela" — nos dois casos o caminho de uma notinha só continua valendo.
+ */
+function mirrorSectors(): MirrorSector[] {
+  try {
+    return readMirrorTable<MirrorSector>('print_sectors')
+      .filter((s) => isTrue(s.enabled))
+      .sort((a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0));
+  } catch {
+    return [];
+  }
+}
+
+/** category_id → sector_id, a partir do espelho de categories. */
+function mirrorCategoryMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  try {
+    for (const c of readMirrorTable<{ id?: string; print_sector_id?: string | null }>('categories')) {
+      if (c.id && c.print_sector_id) map.set(c.id, c.print_sector_id);
+    }
+  } catch {
+    // espelho antigo, sem a coluna — segue sem mapeamento
+  }
+  return map;
+}
+
 /** Cria a notinha local para um pedido offline (criação = trigger order_accepted). */
 export function createLocalPrintJob(orderView: Record<string, unknown>, trigger = 'order_accepted'): void {
   const settings = mirrorSettings();
@@ -56,32 +110,112 @@ export function createLocalPrintJob(orderView: Record<string, unknown>, trigger 
   const lib = getReceiptLib();
   if (!lib) return;
 
+  const orderId = String(orderView.id);
+  const restaurantName = mirrorRestaurantName();
+  const agora = new Date().toISOString();
+
+  const insert = getDb().prepare(
+    `INSERT INTO print_jobs (id, order_id, dedupe_key, status, copies, payload, created_at, target, sector_id)
+     VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+     ON CONFLICT(dedupe_key) DO NOTHING`,
+  );
+
   try {
-    const receiptText = lib.buildReceiptText(orderView, mirrorRestaurantName(), settings);
-    const copies = Math.min(Math.max(Number(settings.print_job_copies ?? 1), 1), 5);
-    const orderId = String(orderView.id);
-    getDb()
-      .prepare(
-        `INSERT INTO print_jobs (id, order_id, dedupe_key, status, copies, payload, created_at)
-         VALUES (?, ?, ?, 'pending', ?, ?, ?)
-         ON CONFLICT(dedupe_key) DO NOTHING`,
-      )
-      .run(
-        crypto.randomUUID(),
-        orderId,
-        `${orderId}:${trigger}`,
-        copies,
+    const sectors = mirrorSectors();
+    const usaSetores =
+      settings.print_routing_mode === 'sector' &&
+      sectors.length > 0 &&
+      typeof lib.buildSectorReceiptText === 'function';
+
+    // Fallback duro: sem setores no espelho, sem a função de comanda no bundle,
+    // ou loja em modo legado → uma notinha completa, exatamente como antes.
+    // Offline NUNCA pode deixar de imprimir por falta de configuração nova.
+    if (!usaSetores) {
+      const receiptText = lib.buildReceiptText(orderView, restaurantName, settings);
+      const copies = Math.min(Math.max(Number(settings.print_job_copies ?? 1), 1), 5);
+      insert.run(
+        crypto.randomUUID(), orderId, `${orderId}:${trigger}`, copies,
         JSON.stringify({
           receipt_text: receiptText,
           order_id: orderId,
-          restaurant_name: mirrorRestaurantName(),
+          restaurant_name: restaurantName,
           total: Number(orderView.total ?? 0),
           customer_name: String(orderView.customer_name ?? ''),
           order_type: String(orderView.order_type ?? ''),
         }),
-        new Date().toISOString(),
+        agora, 'hall', null,
       );
-    console.log(`[print] notinha local criada p/ pedido ${String(orderView.order_number ?? orderId)}`);
+      console.log(`[print] notinha local criada p/ pedido ${String(orderView.order_number ?? orderId)}`);
+      return;
+    }
+
+    // ── Roteamento por setor, espelhando a regra do servidor ──
+    const categoryMap = mirrorCategoryMap();
+    const habilitados = new Set(sectors.map((s) => s.id));
+    const padrao =
+      sectors.find((s) => isTrue(s.is_default)) ??
+      sectors.find((s) => s.slug === 'hall') ??
+      sectors[0]!;
+
+    const itens = Array.isArray(orderView.order_items)
+      ? (orderView.order_items as Array<Record<string, unknown>>)
+      : [];
+
+    const porSetor = new Map<string, Array<Record<string, unknown>>>();
+    for (const item of itens) {
+      const produto = item.products as { category_id?: string | null } | null | undefined;
+      const catId = produto?.category_id ?? null;
+      const mapeado = catId ? categoryMap.get(catId) : undefined;
+      // Mesma cascata do servidor: categoria mapeada para setor habilitado,
+      // senão o padrão. Item nenhum pode ficar sem destino.
+      const destino = mapeado && habilitados.has(mapeado) ? mapeado : padrao.id;
+      const bucket = porSetor.get(destino);
+      if (bucket) bucket.push(item);
+      else porSetor.set(destino, [item]);
+    }
+
+    const disparaAgora = (s: MirrorSector) =>
+      (s.fire_on ?? 'on_accept') === (trigger === 'order_accepted' ? 'on_accept' : trigger);
+
+    let criados = 0;
+    for (const setor of sectors) {
+      if (!disparaAgora(setor)) continue;
+      const itensDoSetor = porSetor.get(setor.id) ?? [];
+      const viaCompleta = isTrue(setor.print_full_order);
+      if (!viaCompleta && itensDoSetor.length === 0) continue;
+
+      const texto = viaCompleta
+        ? lib.buildReceiptText(orderView, restaurantName, {
+            ...settings,
+            print_paper_width_mm: setor.paper_width_mm ?? settings.print_paper_width_mm,
+          })
+        : lib.buildSectorReceiptText!(orderView, restaurantName, settings,
+            { name: setor.name, paper_width_mm: setor.paper_width_mm }, itensDoSetor);
+
+      // dedupe_key no formato do servidor, para o mesmo pedido não sair duas
+      // vezes quando a nuvem voltar e reprocessar.
+      const dedupe = setor.slug === 'hall' && trigger === 'order_accepted'
+        ? `${orderId}:${trigger}`
+        : `${orderId}:${setor.slug}:${trigger}`;
+
+      insert.run(
+        crypto.randomUUID(), orderId, dedupe,
+        Math.min(Math.max(Number(setor.copies ?? 1), 1), 5),
+        JSON.stringify({
+          receipt_text: texto,
+          order_id: orderId,
+          restaurant_name: restaurantName,
+          total: Number(orderView.total ?? 0),
+          customer_name: String(orderView.customer_name ?? ''),
+          order_type: String(orderView.order_type ?? ''),
+          sector_slug: setor.slug,
+          sector_name: setor.name,
+        }),
+        agora, setor.slug, setor.id,
+      );
+      criados++;
+    }
+    console.log(`[print] ${criados} notinha(s) local(is) criada(s) p/ pedido ${String(orderView.order_number ?? orderId)}`);
   } catch (err) {
     console.error('[print] falha ao montar notinha local:', (err as Error).message);
   }
@@ -94,6 +228,9 @@ interface ClaimedJob {
   payload: Record<string, unknown>;
   attempts: number;
   created_at: string;
+  /** Slug do setor — é por ele que o agente escolhe a impressora física. */
+  target: string;
+  sector_id: string | null;
 }
 
 /** Contrato idêntico ao GET /api/print/jobs da nuvem: reclaim de stale + claim. */
@@ -113,12 +250,17 @@ export function claimLocalPrintJobs(): ClaimedJob[] {
      WHERE status = 'processing' AND attempts >= ? AND claimed_at < ?`,
   ).run(MAX_ATTEMPTS, staleBefore);
 
+  // O teto sobe com o número de setores: 3 impressoras esgotariam um limite
+  // pensado para uma, e a comanda da produção esperaria o próximo poll.
+  const setoresAtivos = Math.max(1, mirrorSectors().length);
+  const limite = Math.min(CLAIM_LIMIT * setoresAtivos, 20);
+
   const candidates = db
     .prepare(
-      `SELECT id, order_id, copies, payload, attempts, created_at FROM print_jobs
+      `SELECT id, order_id, copies, payload, attempts, created_at, target, sector_id FROM print_jobs
        WHERE status = 'pending' AND attempts < ? ORDER BY created_at LIMIT ?`,
     )
-    .all(MAX_ATTEMPTS, CLAIM_LIMIT) as Array<Omit<ClaimedJob, 'payload'> & { payload: string }>;
+    .all(MAX_ATTEMPTS, limite) as Array<Omit<ClaimedJob, 'payload'> & { payload: string }>;
 
   const claim = db.prepare(
     `UPDATE print_jobs SET status = 'processing', claimed_at = ?, attempts = attempts + 1,
@@ -167,8 +309,8 @@ export function createTestPrintJob(): void {
 
   getDb()
     .prepare(
-      `INSERT INTO print_jobs (id, order_id, dedupe_key, status, copies, payload, created_at)
-       VALUES (?, 'test', ?, 'pending', 1, ?, ?)`,
+      `INSERT INTO print_jobs (id, order_id, dedupe_key, status, copies, payload, created_at, target)
+       VALUES (?, 'test', ?, 'pending', 1, ?, ?, 'hall')`,
     )
     .run(
       crypto.randomUUID(),

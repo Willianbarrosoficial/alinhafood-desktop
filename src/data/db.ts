@@ -97,6 +97,20 @@ export function getDb(): Database.Database {
     // coluna já existe
   }
 
+  // Migração aditiva: destino da notinha offline. Sem elas, o modo offline só
+  // sabia imprimir uma via no balcão — numa loja com cozinha e produção, tudo
+  // que fosse pedido com o Desktop desconectado saía numa impressora só.
+  try {
+    db.exec("ALTER TABLE print_jobs ADD COLUMN target TEXT NOT NULL DEFAULT 'hall'");
+  } catch {
+    // coluna já existe
+  }
+  try {
+    db.exec('ALTER TABLE print_jobs ADD COLUMN sector_id TEXT');
+  } catch {
+    // coluna já existe
+  }
+
   if (!getMeta('device_id')) setMeta('device_id', crypto.randomUUID());
 
   return db;

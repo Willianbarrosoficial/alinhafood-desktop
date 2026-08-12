@@ -525,7 +525,7 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
     // (segredo local); toda ida à nuvem usa o token ATUAL do restaurante
     // (cloudToken), NUNCA o que o helper mandou — assim é impossível imprimir
     // pedido de outro restaurante mesmo com token defasado.
-    if (url.startsWith('/api/print/jobs') && options.print) {
+    if ((url.startsWith('/api/print/jobs') || url.startsWith('/api/print/poll')) && options.print) {
       const auth = req.headers.authorization ?? '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
       const internal = options.print.expectedToken();
@@ -534,7 +534,11 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       // standalone apontado ao localhost). Qualquer outro → recusa.
       const authorized = !!token && (token === internal || (!!cloudToken && token === cloudToken));
 
-      if (req.method === 'GET' && url === '/api/print/jobs') {
+      // O agente 1.3.0 negocia /api/print/poll e, num 404, cai para
+      // /api/print/jobs. Servir as duas aqui evita que ele regrida para o modo
+      // de alvo único justamente quando o Desktop está no ar — que é quando o
+      // roteamento por setor offline importa.
+      if (req.method === 'GET' && (url === '/api/print/jobs' || url === '/api/print/poll')) {
         if (!authorized) {
           res.writeHead(401, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: 'Token inválido' }));
