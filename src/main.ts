@@ -22,6 +22,7 @@ import {
 } from './data/orders-local';
 import {
   expectedAgentToken,
+  agentScopeByToken,
   claimLocalPrintJobs,
   updateLocalPrintJob,
   pendingLocalPrintJobs,
@@ -272,6 +273,9 @@ async function boot() {
         // de nuvem do restaurante ATUAL (expectedAgentToken lê do espelho).
         expectedToken: helperInternalToken,
         cloudToken: expectedAgentToken,
+        // Tokens por computador (print_agents), espelhados pelo sync/pull —
+        // sem isto o gateway rejeitava qualquer token da seção "Computadores".
+        agentScope: agentScopeByToken,
         claim: claimLocalPrintJobs,
         update: updateLocalPrintJob,
         pendingCount: pendingLocalPrintJobs,

@@ -79,8 +79,18 @@ export interface GatewayOptions {
     expectedToken: () => string | null;
     /** Token de nuvem do restaurante ATUAL — usado nas idas à nuvem. */
     cloudToken: () => string | null;
-    claim: () => unknown[];
-    update: (jobId: string, status: string, errorMessage?: string) => boolean;
+    /**
+     * Escopo de um token por computador (espelho de print_agents); null para
+     * token desconhecido OU espelho sem a tabela — aí vale só o legado.
+     */
+    agentScope?: (token: string) => { agentId: string; sectorIds: string[]; slugs: string[] } | null;
+    claim: (scope?: { agentId: string; sectorIds: string[]; slugs: string[] }) => unknown[];
+    update: (
+      jobId: string,
+      status: string,
+      errorMessage?: string,
+      scope?: { agentId: string; sectorIds: string[]; slugs: string[] },
+    ) => boolean;
     pendingCount: () => number;
   };
 }
@@ -530,9 +540,19 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
       const internal = options.print.expectedToken();
       const cloudToken = options.print.cloudToken();
-      // Aceita o token interno OU o token de nuvem atual (compat com um agente
-      // standalone apontado ao localhost). Qualquer outro → recusa.
-      const authorized = !!token && (token === internal || (!!cloudToken && token === cloudToken));
+      // Token por computador (seção "Computadores" do painel), resolvido no
+      // espelho de print_agents. Antes o gateway só conhecia o interno e o
+      // legado — qualquer loja com Desktop que criasse um computador novo
+      // ficava com o poll morto em 401 local, com a validação passando.
+      const agentScope =
+        token && token !== internal && !(cloudToken && token === cloudToken)
+          ? options.print.agentScope?.(token) ?? null
+          : null;
+      // Aceita o token interno, o token de nuvem atual (compat com um agente
+      // standalone apontado ao localhost) ou um token por computador do
+      // espelho DESTA loja. Qualquer outro → recusa.
+      const authorized =
+        !!token && (token === internal || (!!cloudToken && token === cloudToken) || agentScope !== null);
 
       // O agente 1.3.0 negocia /api/print/poll e, num 404, cai para
       // /api/print/jobs. Servir as duas aqui evita que ele regrida para o modo
@@ -544,14 +564,22 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
           res.end(JSON.stringify({ error: 'Token inválido' }));
           return;
         }
-        if (options.print.pendingCount() > 0 || !health.isOnline()) {
+        // Claim primeiro, decisão pelo resultado: "tem pending" global não
+        // serve para token com escopo — job pendente de OUTRO setor não pode
+        // prender este PC longe da nuvem.
+        const jobs = options.print.claim(agentScope ?? undefined);
+        if (jobs.length > 0 || !health.isOnline()) {
           res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ jobs: options.print.claim() }));
+          res.end(JSON.stringify({ jobs }));
           return;
         }
-        // Online, sem jobs locais: busca delivery na nuvem com o token do
-        // restaurante ATUAL (reescrito), nunca o token do helper.
-        if (cloudToken) {
+        // Online, sem jobs locais para este token: busca delivery na nuvem.
+        // Token por computador segue com o PRÓPRIO Bearer (a nuvem aplica o
+        // escopo e o heartbeat dele); helper/legado seguem com o token do
+        // restaurante ATUAL (reescrito), nunca o interno.
+        if (agentScope) {
+          void proxy(req, res, cloudClient, cloud.host, true);
+        } else if (cloudToken) {
           void proxy(req, res, cloudClient, cloud.host, true, undefined, cloudToken);
         } else {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -568,12 +596,25 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
               status?: string;
               error_message?: string;
             };
-            const isLocal = options.print!.update(patchMatch[1]!, body.status ?? 'failed', body.error_message);
+            const isLocal = options.print!.update(
+              patchMatch[1]!,
+              body.status ?? 'failed',
+              body.error_message,
+              agentScope ?? undefined,
+            );
             if (isLocal) {
               res.writeHead(200, { 'content-type': 'application/json' });
               res.end(JSON.stringify({ ok: true }));
-            } else if (health.isOnline() && cloudToken) {
-              await proxy(req, res, cloudClient, cloud.host, true, Buffer.from(JSON.stringify(body)), cloudToken);
+            } else if (health.isOnline() && (agentScope || cloudToken)) {
+              await proxy(
+                req,
+                res,
+                cloudClient,
+                cloud.host,
+                true,
+                Buffer.from(JSON.stringify(body)),
+                agentScope ? undefined : cloudToken ?? undefined,
+              );
             } else {
               res.writeHead(404, { 'content-type': 'application/json' });
               res.end(JSON.stringify({ error: 'job não encontrado' }));

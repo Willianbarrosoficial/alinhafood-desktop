@@ -39,7 +39,16 @@ type MirrorSector = {
   fire_on?: string | null;
   is_default?: boolean | number | null;
   sort_order?: number | null;
+  /** Computador (print_agents) que atende este setor — vem do sync/pull. */
+  agent_id?: string | null;
 };
+
+/** Escopo de um token por computador: quais setores aquele PC atende. */
+export interface AgentScope {
+  agentId: string;
+  sectorIds: string[];
+  slugs: string[];
+}
 
 /** SQLite guarda booleano como 0/1; o espelho da nuvem manda true/false. */
 function isTrue(v: unknown): boolean {
@@ -71,6 +80,35 @@ export function expectedAgentToken(): string | null {
   const s = mirrorSettings();
   const token = s?.print_agent_token;
   return typeof token === 'string' && token.length > 0 ? token : null;
+}
+
+/**
+ * Resolve um token por computador (print_agents) no espelho local — é o que
+ * permite ao gateway aceitar os tokens da seção "Computadores" do painel, e
+ * não só o token legado. Devolve null para token desconhecido E para espelho
+ * sem a tabela (nuvem/pull antigos): nos dois casos o gateway se comporta
+ * exatamente como antes.
+ */
+export function agentScopeByToken(token: string): AgentScope | null {
+  if (!token) return null;
+  try {
+    const agent = readMirrorTable<{ id?: string; token?: string }>('print_agents')
+      .find((a) => typeof a.token === 'string' && a.token === token);
+    if (!agent?.id) return null;
+
+    // Espelha o vínculo da nuvem (print_sectors.agent_id). Agente sem setor
+    // tem escopo vazio — recebe nada, igual à fn_print_poll_multi.
+    const meus = readMirrorTable<MirrorSector>('print_sectors')
+      .filter((s) => isTrue(s.enabled) && s.agent_id === agent.id);
+
+    return {
+      agentId: agent.id,
+      sectorIds: meus.map((s) => s.id),
+      slugs: meus.map((s) => s.slug),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -233,8 +271,31 @@ interface ClaimedJob {
   sector_id: string | null;
 }
 
-/** Contrato idêntico ao GET /api/print/jobs da nuvem: reclaim de stale + claim. */
-export function claimLocalPrintJobs(): ClaimedJob[] {
+/**
+ * `sector_id IN (…) OR (sector_id IS NULL AND target IN (…))` — a MESMA regra
+ * de escopo da fn_print_poll_multi da nuvem. Lista vazia vira a constante `0`
+ * (falso): SQLite recusa `IN ()`, e um agente sem setor não deve casar nada.
+ */
+function scopeClause(scope: AgentScope): { sql: string; params: string[] } {
+  const bySector = scope.sectorIds.length > 0
+    ? `sector_id IN (${scope.sectorIds.map(() => '?').join(',')})`
+    : '0';
+  const bySlug = scope.slugs.length > 0
+    ? `target IN (${scope.slugs.map(() => '?').join(',')})`
+    : '0';
+  return {
+    sql: `(${bySector} OR (sector_id IS NULL AND ${bySlug}))`,
+    params: [...scope.sectorIds, ...scope.slugs],
+  };
+}
+
+/**
+ * Contrato idêntico ao GET /api/print/jobs da nuvem: reclaim de stale + claim.
+ * Com `scope` (token por computador), cada PC leva só os jobs dos setores
+ * dele; sem escopo (token interno do helper ou o legado), leva tudo — que é o
+ * comportamento de sempre.
+ */
+export function claimLocalPrintJobs(scope?: AgentScope): ClaimedJob[] {
   const db = getDb();
   const now = new Date().toISOString();
   const staleBefore = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
@@ -255,12 +316,13 @@ export function claimLocalPrintJobs(): ClaimedJob[] {
   const setoresAtivos = Math.max(1, mirrorSectors().length);
   const limite = Math.min(CLAIM_LIMIT * setoresAtivos, 20);
 
+  const filtro = scope ? scopeClause(scope) : null;
   const candidates = db
     .prepare(
       `SELECT id, order_id, copies, payload, attempts, created_at, target, sector_id FROM print_jobs
-       WHERE status = 'pending' AND attempts < ? ORDER BY created_at LIMIT ?`,
+       WHERE status = 'pending' AND attempts < ?${filtro ? ` AND ${filtro.sql}` : ''} ORDER BY created_at LIMIT ?`,
     )
-    .all(MAX_ATTEMPTS, limite) as Array<Omit<ClaimedJob, 'payload'> & { payload: string }>;
+    .all(MAX_ATTEMPTS, ...(filtro?.params ?? []), limite) as Array<Omit<ClaimedJob, 'payload'> & { payload: string }>;
 
   const claim = db.prepare(
     `UPDATE print_jobs SET status = 'processing', claimed_at = ?, attempts = attempts + 1,
@@ -275,11 +337,22 @@ export function claimLocalPrintJobs(): ClaimedJob[] {
   return claimed;
 }
 
-/** PATCH do agente: completed | failed. Retorna false se o job não é local. */
-export function updateLocalPrintJob(jobId: string, status: string, errorMessage?: string): boolean {
+/**
+ * PATCH do agente: completed | failed. Retorna false se o job não é local.
+ * Com `scope`, o update só alcança jobs do escopo daquele token — a mesma
+ * proteção do `.in('target', slugs)` da rota da nuvem: sem ela, um id cruzado
+ * fecharia comanda de outro setor sem papel nenhum ter saído.
+ */
+export function updateLocalPrintJob(
+  jobId: string,
+  status: string,
+  errorMessage?: string,
+  scope?: AgentScope,
+): boolean {
+  const filtro = scope ? scopeClause(scope) : null;
   const result = getDb()
-    .prepare('UPDATE print_jobs SET status = ?, error_message = ? WHERE id = ?')
-    .run(status === 'completed' ? 'completed' : 'failed', errorMessage ?? null, jobId);
+    .prepare(`UPDATE print_jobs SET status = ?, error_message = ? WHERE id = ?${filtro ? ` AND ${filtro.sql}` : ''}`)
+    .run(status === 'completed' ? 'completed' : 'failed', errorMessage ?? null, jobId, ...(filtro?.params ?? []));
   return result.changes > 0;
 }
 
