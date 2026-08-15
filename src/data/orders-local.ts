@@ -308,18 +308,31 @@ export function markLocalOrdersPaid(body: {
   return { ok: true };
 }
 
-/** As telas leem o nome via order_items[].products.name — enriquece do espelho. */
+/**
+ * As telas leem o nome via order_items[].products.name — enriquece do espelho.
+ *
+ * `category_id` vem junto porque é por ele que a impressão decide o setor: sem
+ * isso, todo pedido criado OFFLINE caía inteiro no setor padrão (o item local
+ * guarda só `product_id`, e a cascata não tinha como chegar na categoria).
+ */
 function enrichItemsWithProductName(order: MirrorOrder): MirrorOrder {
   const items = order.order_items;
   if (!Array.isArray(items)) return order;
-  const products = readMirrorTable<{ id: string; name?: string }>('products');
-  const nameById = new Map(products.map((p) => [String(p.id), p.name ?? 'Produto']));
+  const products = readMirrorTable<{ id: string; name?: string; category_id?: string | null }>('products');
+  const byId = new Map(products.map((p) => [String(p.id), p]));
   return {
     ...order,
     order_items: items.map((raw) => {
       const item = raw as Record<string, unknown>;
       if (item.products && typeof item.products === 'object') return item;
-      return { ...item, products: { name: nameById.get(String(item.product_id)) ?? 'Produto' } };
+      const produto = byId.get(String(item.product_id));
+      return {
+        ...item,
+        products: {
+          name: produto?.name ?? 'Produto',
+          category_id: produto?.category_id ?? null,
+        },
+      };
     }),
   };
 }

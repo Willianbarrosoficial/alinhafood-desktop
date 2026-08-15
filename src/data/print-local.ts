@@ -37,11 +37,23 @@ type MirrorSector = {
   copies?: number | null;
   print_full_order?: boolean | number | null;
   fire_on?: string | null;
+  /** Canal que o setor atende: 'all' | 'delivery' | 'salao'. */
+  channel_filter?: string | null;
   is_default?: boolean | number | null;
   sort_order?: number | null;
   /** Computador (print_agents) que atende este setor — vem do sync/pull. */
   agent_id?: string | null;
 };
+
+/** Uma linha de "o que este setor imprime" (print_sector_rules da nuvem). */
+type MirrorRule = {
+  sector_id?: string | null;
+  category_id?: string | null;
+  product_id?: string | null;
+  channel?: string | null;
+};
+
+type OrderChannel = 'delivery' | 'salao';
 
 /** Escopo de um token por computador: quais setores aquele PC atende. */
 export interface AgentScope {
@@ -126,17 +138,63 @@ function mirrorSectors(): MirrorSector[] {
   }
 }
 
-/** category_id → sector_id, a partir do espelho de categories. */
-function mirrorCategoryMap(): Map<string, string> {
-  const map = new Map<string, string>();
+/**
+ * Canal do pedido, para o recorte por canal. MESMA régua do servidor
+ * (`resolveOrderChannel`): mesa, balcão e consumo no local são salão; entrega e
+ * RETIRADA são delivery.
+ */
+function canalDoPedido(orderView: Record<string, unknown>): OrderChannel {
+  const tipo = String(orderView.order_type ?? '');
+  if (tipo === 'mesa' || tipo === 'balcao') return 'salao';
+  if (String(orderView.delivery_type ?? '') === 'dine_in') return 'salao';
+  return 'delivery';
+}
+
+/**
+ * O que cada setor imprime, espelhado da nuvem e já recortado para o canal
+ * deste pedido: category_id → setores, product_id → setores.
+ *
+ * Espelho sem regras cai no mapeamento antigo (`categories.print_sector_id`),
+ * que cobre os dois casos em que ele fica vazio: nuvem antiga que ainda não
+ * manda a tabela, e loja que de fato não configurou nada — nesta o espelho
+ * legado também está vazio, porque o painel mantém os dois em sincronia.
+ */
+function mirrorRules(canal: OrderChannel, habilitados: Set<string>) {
+  const porCategoria = new Map<string, string[]>();
+  const porProduto = new Map<string, string[]>();
+
+  const empilhar = (mapa: Map<string, string[]>, chave: string, sectorId: string) => {
+    mapa.set(chave, [...(mapa.get(chave) ?? []), sectorId]);
+  };
+
+  let regras: MirrorRule[] = [];
+  try {
+    regras = readMirrorTable<MirrorRule>('print_sector_rules');
+  } catch {
+    regras = [];
+  }
+
+  if (regras.length > 0) {
+    for (const r of regras) {
+      if (!r.sector_id || !habilitados.has(r.sector_id)) continue;
+      const canalRegra = r.channel ?? 'all';
+      if (canalRegra !== 'all' && canalRegra !== canal) continue;
+      if (r.product_id) empilhar(porProduto, r.product_id, r.sector_id);
+      else if (r.category_id) empilhar(porCategoria, r.category_id, r.sector_id);
+    }
+    return { porCategoria, porProduto };
+  }
+
   try {
     for (const c of readMirrorTable<{ id?: string; print_sector_id?: string | null }>('categories')) {
-      if (c.id && c.print_sector_id) map.set(c.id, c.print_sector_id);
+      if (c.id && c.print_sector_id && habilitados.has(c.print_sector_id)) {
+        empilhar(porCategoria, c.id, c.print_sector_id);
+      }
     }
   } catch {
     // espelho antigo, sem a coluna — segue sem mapeamento
   }
-  return map;
+  return { porCategoria, porProduto };
 }
 
 /** Cria a notinha local para um pedido offline (criação = trigger order_accepted). */
@@ -188,35 +246,79 @@ export function createLocalPrintJob(orderView: Record<string, unknown>, trigger 
     }
 
     // ── Roteamento por setor, espelhando a regra do servidor ──
-    const categoryMap = mirrorCategoryMap();
-    const habilitados = new Set(sectors.map((s) => s.id));
+    // Setor restrito a um canal sai inteiro deste pedido, igual à nuvem.
+    const canal = canalDoPedido(orderView);
+    const doCanal = sectors.filter((s) => {
+      const filtro = s.channel_filter ?? 'all';
+      return filtro === 'all' || filtro === canal;
+    });
+    const habilitados = new Set(doCanal.map((s) => s.id));
+    const { porCategoria, porProduto } = mirrorRules(canal, habilitados);
     const padrao =
-      sectors.find((s) => isTrue(s.is_default)) ??
-      sectors.find((s) => s.slug === 'hall') ??
-      sectors[0]!;
+      doCanal.find((s) => isTrue(s.is_default)) ??
+      doCanal.find((s) => s.slug === 'hall') ??
+      doCanal[0];
+
+    // Sem nenhum setor atendendo este canal não há para onde mandar; a nota
+    // completa do fallback lá em cima é melhor que pedido sem papel.
+    if (!padrao) {
+      const receiptText = lib.buildReceiptText(orderView, restaurantName, settings);
+      insert.run(
+        crypto.randomUUID(), orderId, `${orderId}:${trigger}`,
+        Math.min(Math.max(Number(settings.print_job_copies ?? 1), 1), 5),
+        JSON.stringify({
+          receipt_text: receiptText,
+          order_id: orderId,
+          restaurant_name: restaurantName,
+          total: Number(orderView.total ?? 0),
+          customer_name: String(orderView.customer_name ?? ''),
+          order_type: String(orderView.order_type ?? ''),
+        }),
+        agora, 'hall', null,
+      );
+      return;
+    }
 
     const itens = Array.isArray(orderView.order_items)
       ? (orderView.order_items as Array<Record<string, unknown>>)
       : [];
 
-    const porSetor = new Map<string, Array<Record<string, unknown>>>();
-    for (const item of itens) {
-      const produto = item.products as { category_id?: string | null } | null | undefined;
-      const catId = produto?.category_id ?? null;
-      const mapeado = catId ? categoryMap.get(catId) : undefined;
-      // Mesma cascata do servidor: categoria mapeada para setor habilitado,
-      // senão o padrão. Item nenhum pode ficar sem destino.
-      const destino = mapeado && habilitados.has(mapeado) ? mapeado : padrao.id;
-      const bucket = porSetor.get(destino);
-      if (bucket) bucket.push(item);
-      else porSetor.set(destino, [item]);
-    }
-
     const disparaAgora = (s: MirrorSector) =>
       (s.fire_on ?? 'on_accept') === (trigger === 'order_accepted' ? 'on_accept' : trigger);
+    const automatico = trigger !== 'manual_sector';
+    const imprimeSozinho = new Set(
+      doCanal.filter((s) => (s.fire_on ?? 'on_accept') !== 'manual').map((s) => s.id),
+    );
+
+    const porSetor = new Map<string, Array<Record<string, unknown>>>();
+    const adicionar = (sectorId: string, item: Record<string, unknown>) => {
+      const bucket = porSetor.get(sectorId);
+      if (bucket) bucket.push(item);
+      else porSetor.set(sectorId, [item]);
+    };
+
+    for (const item of itens) {
+      // Mesma cascata do servidor: produto (exceção) → categoria → padrão. Um
+      // item pode cair em VÁRIOS setores, e nenhum item pode ficar sem destino.
+      const produto = item.products as { category_id?: string | null } | null | undefined;
+      const productId = typeof item.product_id === 'string' ? item.product_id : null;
+      const catId = produto?.category_id ?? null;
+
+      let destinos = (productId ? porProduto.get(productId) : undefined) ?? [];
+      if (destinos.length === 0) destinos = (catId ? porCategoria.get(catId) : undefined) ?? [];
+      if (destinos.length === 0) destinos = [padrao.id];
+
+      for (const sectorId of new Set(destinos)) adicionar(sectorId, item);
+
+      // Item que só caiu em setor de disparo manual não sairia em comanda
+      // nenhuma no fluxo automático — vai também para o padrão.
+      if (automatico && !destinos.some((id) => imprimeSozinho.has(id)) && !destinos.includes(padrao.id)) {
+        adicionar(padrao.id, item);
+      }
+    }
 
     let criados = 0;
-    for (const setor of sectors) {
+    for (const setor of doCanal) {
       if (!disparaAgora(setor)) continue;
       const itensDoSetor = porSetor.get(setor.id) ?? [];
       const viaCompleta = isTrue(setor.print_full_order);
