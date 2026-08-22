@@ -48,6 +48,23 @@ const MIRROR_QUERIES: Record<string, (rows: MirrorRow[]) => MirrorRow[]> = {
   tables: byNumber('number'),
   store_settings: (rows) => rows,
   restaurants: (rows) => rows,
+  // 0.5.0 — o que as telas de salão passaram a ler desde julho: áreas de mesa
+  // (grade agrupada), grupos de categorias (lateral em árvore), tamanhos
+  // (pizza P/M/G precisa de category_sizes + size_definitions; o preço vem em
+  // products.product_size_prices) e grupos de meio a meio. Sem isso no espelho
+  // o offline degradava para "cardápio plano" — e pizza por tamanho sem preço.
+  table_areas: (rows) =>
+    [...rows].sort(
+      (a, b) =>
+        Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0) ||
+        String(a.name ?? '').localeCompare(String(b.name ?? '')),
+    ),
+  category_groups: byNumber('sort_order'),
+  category_group_members: byNumber('sort_order'),
+  category_sizes: byNumber('sort_order'),
+  size_definitions: byNumber('sort_order'),
+  mix_groups: (rows) =>
+    [...rows].sort((a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''))),
 };
 
 /** Aponta as imagens do cardápio pro cache local do gateway (offline mostra fotos). */
@@ -59,6 +76,9 @@ function rewriteImages(name: string, rows: MirrorRow[], gatewayPort: number): Mi
   }
   if (name === 'store_settings') {
     return rows.map((r) => ({ ...r, logo_url: rewrite(r.logo_url), cover_url: rewrite(r.cover_url) }));
+  }
+  if (name === 'category_groups' || name === 'category_sizes') {
+    return rows.map((r) => ({ ...r, image_url: rewrite(r.image_url) }));
   }
   return rows;
 }
@@ -231,6 +251,16 @@ async function boot() {
       health,
       isPackaged: app.isPackaged,
       syncStatus: () => ({ ...pull!.status() }),
+      // Loja ativa do painel (cookie admin_restaurant_id): é ela que o sync
+      // espelha e que os pedidos offline carregam. Dono de uma loja só nunca
+      // muda; dono de várias troca pelo seletor e o espelho acompanha no
+      // próximo ciclo.
+      noteActiveRestaurant: (id) => {
+        if (getMeta('active_restaurant_id') === id) return;
+        setMeta('active_restaurant_id', id);
+        console.log(`[gateway] loja ativa do painel: ${id}`);
+        void pull?.syncNow();
+      },
       update: {
         pending: () => pendingUpdate,
         install: () => installUpdateFn?.(),

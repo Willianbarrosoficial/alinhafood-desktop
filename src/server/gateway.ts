@@ -41,6 +41,9 @@ export interface GatewayOptions {
   };
   /** Leitura do espelho local: nome da query → resultado (Fase 2+) */
   localQuery?: (name: string, params: URLSearchParams) => unknown | undefined;
+  /** Loja ativa do painel, lida do cookie `admin_restaurant_id` de cada
+   *  chamada proxiada — é o que diz ao sync QUAL empresa espelhar (0.5.0). */
+  noteActiveRestaurant?: (restaurantId: string) => void;
   /** Criação de pedido offline (Fase 3) */
   localCreateOrder?: (body: unknown) =>
     | { ok: true; orderId: string; orderNumber: string }
@@ -436,6 +439,14 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
+
+    // Dono de várias empresas: o painel grava a loja escolhida nesse cookie e
+    // toda chamada /api/ o carrega. Capturar aqui (e não no login) acompanha a
+    // troca pelo seletor sem nenhuma mudança no web.
+    if (options.noteActiveRestaurant && url.startsWith('/api/')) {
+      const match = /(?:^|;\s*)admin_restaurant_id=([0-9a-fA-F-]{36})/.exec(req.headers.cookie ?? '');
+      if (match) options.noteActiveRestaurant(match[1]!);
+    }
 
     if (url === '/api/local/orders' && req.method === 'POST') {
       void handleLocalOrder(req, res);

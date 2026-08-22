@@ -12,7 +12,8 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["../Alinhafood 01/*"]
+      "@/*": ["../Alinhafood 01/*"],
+      "@alinhafood/shared/*": ["../Alinhafood 01/packages/shared/src/*"]
     }
   },
   "include": ["src/**/*.ts"]

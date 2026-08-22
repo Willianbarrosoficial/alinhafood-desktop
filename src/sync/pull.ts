@@ -170,7 +170,13 @@ export class PullEngine {
       // antes de qualquer atualização de espelho sobrescrever o estado local.
       await this.drainOutbox(token);
 
-      const res = await request(`${this.config.cloudUrl.replace(/\/$/, '')}/api/sync/pull`, {
+      // Loja ativa do painel (cookie capturado pelo gateway). Sem ela a nuvem
+      // devolve a empresa principal do dono — correto para quem tem uma só.
+      const activeRestaurant = getMeta('active_restaurant_id');
+      const pullUrl =
+        `${this.config.cloudUrl.replace(/\/$/, '')}/api/sync/pull` +
+        (activeRestaurant ? `?restaurant_id=${encodeURIComponent(activeRestaurant)}` : '');
+      const res = await request(pullUrl, {
         method: 'GET',
         headers: {
           authorization: `Bearer ${token}`,
@@ -182,6 +188,10 @@ export class PullEngine {
 
       if (res.statusCode === 401 || res.statusCode === 403) {
         await res.body.dump();
+        // 403 com loja ativa marcada = a loja não é deste dono (outra conta
+        // entrou no mesmo PC, ou a empresa foi removida). Solta a marcação para
+        // o próximo ciclo cair na empresa principal em vez de ficar preso.
+        if (res.statusCode === 403 && activeRestaurant) setMeta('active_restaurant_id', '');
         this.lastError = 'sessão expirada — faça login novamente';
         return;
       }

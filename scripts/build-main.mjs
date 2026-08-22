@@ -31,7 +31,9 @@ await build({
   outfile: 'dist/receipt-lib.js',
   // Bundla TUDO (inclusive supabase-js, nunca instanciado offline) — o alias
   // resolve os imports '@/' da Alinhafood 01 dentro do próprio projeto dela.
-  alias: { '@': '../Alinhafood 01' },
+  // `@alinhafood/shared` é o pacote de regras puras da Alinhafood 01 (resolvido
+  // lá por `paths` do tsconfig, sem node_modules) — a notinha importa dele.
+  alias: { '@': '../Alinhafood 01', '@alinhafood/shared': '../Alinhafood 01/packages/shared/src' },
 });
 
 console.log('[build-main] dist/main.js, dist/preload.js e dist/receipt-lib.js gerados');

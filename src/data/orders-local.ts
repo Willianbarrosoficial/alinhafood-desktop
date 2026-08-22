@@ -34,6 +34,13 @@ interface ItemInput {
   unit_price: number;
   note?: string | null;
   selected_options?: unknown[];
+  /**
+   * Tamanho + sabores da pizza (snapshot montado pela tela). Era descartado
+   * aqui: a comanda offline saía sem o P/M/G e o pedido subia para a nuvem sem
+   * composição — o estoque baixava como se fosse tamanho médio. Vai literal
+   * para order_items.composition, como na rota online.
+   */
+  composition?: unknown;
 }
 
 export interface CreateLocalOrderBody {
@@ -42,7 +49,7 @@ export interface CreateLocalOrderBody {
   total?: number;
 }
 
-type MirrorCaixaSession = { id: string; status?: string };
+type MirrorCaixaSession = { id: string; status?: string; canal?: string | null };
 type MirrorOrder = Record<string, unknown> & {
   id: string;
   table_number?: number | null;
@@ -53,9 +60,28 @@ type MirrorOrder = Record<string, unknown> & {
 
 const ACTIVE_STATUSES = new Set(['pending', 'confirmed', 'preparing', 'ready', 'delivered']);
 
-function openCaixaSession(): MirrorCaixaSession | null {
-  const sessions = readMirrorTable<MirrorCaixaSession>('caixa_sessions');
-  return sessions.find((s) => s.status === 'open') ?? sessions[0] ?? null;
+/**
+ * Sessão de caixa que recebe o pedido offline.
+ *
+ * Loja com "caixa separado por setor" tem DUAS gavetas abertas (salão e
+ * delivery); mesa e balcão são salão — mesma régua de `canalDoPedido` no
+ * servidor (lib/server/caixa-canal.ts). Pegar "qualquer caixa aberto" aqui
+ * fazia a venda de mesa cair na gaveta do delivery. A sessão 'geral' segue
+ * valendo como transição (loja que ligou a chave com o caixa antigo aberto).
+ * Loja sem separação: canal 'geral', a gaveta única de sempre.
+ */
+function openCaixaSession(): { session: MirrorCaixaSession | null; canal: 'geral' | 'salao' } {
+  const settings = readMirrorTable<{ caixa_separado_por_canal?: boolean }>('store_settings')[0];
+  const canal = settings?.caixa_separado_por_canal === true ? 'salao' : 'geral';
+  const abertas = readMirrorTable<MirrorCaixaSession>('caixa_sessions').filter(
+    (s) => s.status === 'open',
+  );
+  const aceitas = canal === 'geral' ? ['geral'] : ['salao', 'geral'];
+  const session =
+    abertas.find((s) => (s.canal ?? 'geral') === canal) ??
+    abertas.find((s) => aceitas.includes(s.canal ?? 'geral')) ??
+    null;
+  return { session, canal };
 }
 
 function nextLocalOrderNumber(sessionId: string): string {
@@ -84,9 +110,13 @@ export function createLocalOrder(body: CreateLocalOrderBody):
     return { ok: false, status: 422, error: 'Somente pedidos de mesa e balcão podem ser criados offline.' };
   }
 
-  const session = openCaixaSession();
+  const { session, canal } = openCaixaSession();
   if (!session) {
-    return { ok: false, status: 409, error: 'Abra o caixa antes de criar pedidos.' };
+    return {
+      ok: false,
+      status: 409,
+      error: canal === 'salao' ? 'Abra o caixa do salão antes de criar pedidos.' : 'Abra o caixa antes de criar pedidos.',
+    };
   }
 
   const orderId = crypto.randomUUID();
@@ -129,6 +159,7 @@ export function createLocalOrder(body: CreateLocalOrderBody):
     unit_price: i.unit_price,
     note: i.note ?? null,
     selected_options: Array.isArray(i.selected_options) ? i.selected_options : [],
+    composition: i.composition ?? null,
   }));
 
   // A comanda local carrega os itens aninhados no mesmo formato do select
