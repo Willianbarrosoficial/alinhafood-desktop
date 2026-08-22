@@ -20,8 +20,6 @@ const REQUIRED_KEYS = [
   'NEXT_PUBLIC_SUPABASE_URL',
   'NEXT_PUBLIC_SUPABASE_ANON_KEY',
   'NEXT_PUBLIC_APP_URL',
-  'ADMIN_PATH_SECRET',
-  'NEXT_PUBLIC_ADMIN_PATH_SECRET',
 ];
 
 const FORBIDDEN_KEYS = ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET'];
@@ -113,7 +111,6 @@ const config = {
   appServerPort: 3738,
   supabaseUrl: desktopEnv.NEXT_PUBLIC_SUPABASE_URL,
   supabaseAnonKey: desktopEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  adminPathSecret: desktopEnv.ADMIN_PATH_SECRET,
 };
 fs.writeFileSync(
   path.join(desktopRoot, 'resources', 'desktop-config.json'),

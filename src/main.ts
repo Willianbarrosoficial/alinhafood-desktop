@@ -295,7 +295,7 @@ async function boot() {
         setupPin,
         verifyPin,
         storedToken: storedSessionToken,
-        redirectPath: () => adminRedirectPath(config.adminPathSecret),
+        redirectPath: () => adminRedirectPath(),
         saveSnapshot: saveSessionSnapshot,
         snapshot: sessionSnapshot,
       },

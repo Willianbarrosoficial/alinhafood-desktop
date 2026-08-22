@@ -91,8 +91,7 @@ function spawnAppServer(serverJs: string, port: number, config: DesktopConfig): 
       NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,
       NEXT_PUBLIC_SUPABASE_ANON_KEY: config.supabaseAnonKey,
       NEXT_PUBLIC_APP_URL: config.cloudUrl,
-      ADMIN_PATH_SECRET: config.adminPathSecret,
-      NEXT_PUBLIC_ADMIN_PATH_SECRET: config.adminPathSecret,
+      // ADMIN_PATH_SECRET saiu: o painel não usa mais segredo de URL (2026-08-22).
     },
   });
 }

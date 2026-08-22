@@ -11,7 +11,6 @@ export interface DesktopConfig {
   appServerPort: number;
   supabaseUrl: string;
   supabaseAnonKey: string;
-  adminPathSecret: string;
 }
 
 const DEFAULTS = {
@@ -48,7 +47,7 @@ export function loadConfig(): DesktopConfig {
     appServerPort: Number(env.ALINHAFOOD_APP_SERVER_PORT ?? fromFile.appServerPort ?? DEFAULTS.appServerPort),
     supabaseUrl: env.NEXT_PUBLIC_SUPABASE_URL ?? fromFile.supabaseUrl ?? '',
     supabaseAnonKey: env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? fromFile.supabaseAnonKey ?? '',
-    adminPathSecret: env.ADMIN_PATH_SECRET ?? fromFile.adminPathSecret ?? '',
+    // `adminPathSecret` de um desktop-config.json antigo é ignorado de propósito.
   };
 
   if (!config.cloudUrl) {

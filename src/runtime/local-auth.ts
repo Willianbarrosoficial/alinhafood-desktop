@@ -70,9 +70,16 @@ export function sessionSnapshot(): string | null {
   return getSessionSnapshot();
 }
 
-/** Caminho do admin p/ redirecionar após o login por PIN: /<slug>/admin/<secret>. */
-export function adminRedirectPath(adminPathSecret: string): string | null {
+/**
+ * Caminho do admin p/ redirecionar após o login por PIN: /<slug>/admin.
+ *
+ * O segredo de URL (ADMIN_PATH_SECRET) foi aposentado na nuvem em 2026-08-22:
+ * a autoridade é o cookie de sessão, e o middleware do painel embarcado aceita
+ * o caminho com slug (host 127.0.0.1) sem segmento nenhum — um segmento extra,
+ * se vier de um .exe antigo, é simplesmente ignorado.
+ */
+export function adminRedirectPath(): string | null {
   const restaurant = readMirrorTable<{ slug?: string }>('restaurants')[0];
-  if (!restaurant?.slug || !adminPathSecret) return null;
-  return `/${restaurant.slug}/admin/${adminPathSecret}`;
+  if (!restaurant?.slug) return null;
+  return `/${restaurant.slug}/admin`;
 }
