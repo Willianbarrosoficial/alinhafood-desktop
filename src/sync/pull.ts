@@ -127,9 +127,15 @@ export class PullEngine {
         } else if (res.statusCode === 401 || res.statusCode === 403) {
           this.lastError = 'sessão expirada — faça login novamente para sincronizar';
           return;
-        } else if (res.statusCode === 404) {
-          // Endpoint ausente na nuvem (deploy pendente / mismatch de versão) —
-          // retryable, nunca dead-letter: o pedido não pode morrer por isso.
+        } else if (res.statusCode === 404 && !responseBody?.error) {
+          // Endpoint ausente na nuvem (deploy pendente / mismatch de versão):
+          // o Next responde a página HTML de 404 (sem JSON) — retryable, nunca
+          // dead-letter: o pedido não pode morrer por isso. Já um 404 EM JSON
+          // ("Pedido não encontrado.") veio de uma rota viva e cai no ramo de
+          // baixo: em campo, um status mudado offline de pedido que o dono
+          // apagou na nuvem ficava preso aqui com centenas de tentativas — e,
+          // como o ciclo para no primeiro evento que falha, prendia atrás dele
+          // todo pedido offline criado depois.
           this.lastError = 'nuvem sem endpoint de sync — aguardando deploy';
           db.prepare('UPDATE sync_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(
             this.lastError,

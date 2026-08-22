@@ -95,6 +95,45 @@ export function expectedAgentToken(): string | null {
 }
 
 /**
+ * Como a NUVEM enxerga o token que o Desktop usa — é o que a tela "Impressora
+ * embutida" mostra ao dono. O Desktop imprime com `store_settings.print_agent_token`
+ * do espelho; desde a migration dos setores esse token é também o de um
+ * computador da seção "Setores e Impressoras" (vínculo novo→legado por
+ * `mirrorLegacyToken`). Loja em modo setor só entrega comanda a token que
+ * resolve em print_agents com setor vinculado — sem isso o Desktop aparece
+ * online e não imprime nada ("token legado cego").
+ */
+export interface CloudAgentInfo {
+  routing_mode: 'legacy' | 'sector';
+  token_present: boolean;
+  /** Computador da seção 5 cujo token é o do Desktop; null = não cadastrado. */
+  agent: { id: string; name: string } | null;
+  sectors: Array<{ id: string; slug: string; name: string }>;
+  /** false = espelho ainda sem print_agents (nuvem/pull antigos) — não dá para saber. */
+  known: boolean;
+}
+
+export function cloudAgentInfo(): CloudAgentInfo {
+  const settings = mirrorSettings();
+  const routing_mode = settings?.print_routing_mode === 'sector' ? 'sector' : 'legacy';
+  const token = expectedAgentToken();
+  const base: CloudAgentInfo = { routing_mode, token_present: token !== null, agent: null, sectors: [], known: false };
+  if (!token) return base;
+  try {
+    const agents = readMirrorTable<{ id?: string; token?: string; name?: string }>('print_agents');
+    const agent = agents.find((a) => typeof a.token === 'string' && a.token === token);
+    if (!agent?.id) return { ...base, known: agents.length > 0 };
+    const sectors = readMirrorTable<MirrorSector>('print_sectors')
+      .filter((s) => isTrue(s.enabled) && s.agent_id === agent.id)
+      .sort((a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0))
+      .map((s) => ({ id: s.id, slug: s.slug, name: s.name }));
+    return { routing_mode, token_present: true, agent: { id: agent.id, name: agent.name ?? 'Computador' }, sectors, known: true };
+  } catch {
+    return base;
+  }
+}
+
+/**
  * Resolve um token por computador (print_agents) no espelho local — é o que
  * permite ao gateway aceitar os tokens da seção "Computadores" do painel, e
  * não só o token legado. Devolve null para token desconhecido E para espelho

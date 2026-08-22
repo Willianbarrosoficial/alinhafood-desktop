@@ -23,6 +23,7 @@ import {
 import {
   expectedAgentToken,
   agentScopeByToken,
+  cloudAgentInfo,
   claimLocalPrintJobs,
   updateLocalPrintJob,
   pendingLocalPrintJobs,
@@ -321,7 +322,9 @@ async function boot() {
               isDefault: p.isDefault,
             })),
           );
-          return { ...helperStatus(), printers };
+          // `cloud`: como a nuvem enxerga este computador (seção 5) — a tela
+          // avisa quando a loja imprime por setor e o Desktop não está vinculado.
+          return { ...helperStatus(), printers, cloud: cloudAgentInfo() };
         },
         save: (body) =>
           configureHelper(
