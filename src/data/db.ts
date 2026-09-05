@@ -1,25 +1,100 @@
-import Database from 'better-sqlite3';
+import Database from 'better-sqlite3-multiple-ciphers';
 import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { carregarOuCriarChave } from './db-key';
 
 /**
- * Banco local do desktop — %APPDATA%/Alinhafood/store.db (WAL).
+ * Banco local do desktop — %APPDATA%/Alinhafood/store.db (WAL, cifrado).
  *
  * Fase 2: espelho de LEITURA genérico (mirror_rows guarda a linha inteira em
  * JSON, agnóstico a schema — resiliente a mudanças de colunas na nuvem).
  * Fase 3 adiciona tabelas próprias para escrita (orders, caixa, outbox).
+ *
+ * Cifra (auditoria LGPD 2026-09-04, L-24): o arquivo é o espelho de pedidos e
+ * clientes da loja; em texto puro, um PC roubado levava a base inteira. O driver
+ * `better-sqlite3-multiple-ciphers` é o mesmo better-sqlite3 com o SQLite3
+ * Multiple Ciphers embutido; a chave vem de db-key.ts. Um store.db antigo (até
+ * a 0.6.1) é cifrado NO LUGAR no primeiro boot, via `PRAGMA rekey`.
  */
 
 let db: Database.Database | null = null;
+
+/** O banco responde com esta chave (ou sem chave, se `d` foi aberto sem ela)? */
+function estaLegivel(d: Database.Database): boolean {
+  try {
+    d.prepare('SELECT count(*) AS n FROM sqlite_master').get();
+    return true;
+  } catch {
+    return false; // "file is not a database": chave errada ou ausente
+  }
+}
+
+function aplicarChave(d: Database.Database, hex: string): void {
+  // Passphrase (o hex vira senha, derivada pelo driver). O formato raw x'…' varia
+  // por cifra; a passphrase funciona em todas e é o que a documentação recomenda.
+  d.pragma(`key = '${hex}'`);
+}
+
+/**
+ * Abre store.db cifrado. Três casos:
+ *  - arquivo não existe → cria já cifrado;
+ *  - arquivo cifrado com a nossa chave → abre;
+ *  - arquivo em texto puro (instalação antiga) → cifra no lugar e abre.
+ * Se a cifra falhar, devolve o banco como está: operação da loja primeiro. O
+ * motivo fica em local_meta.db_encryption para o suporte enxergar.
+ */
+function abrirCifrado(file: string): { db: Database.Database; estado: string } {
+  const { hex, protegida } = carregarOuCriarChave();
+  const existia = fs.existsSync(file);
+
+  let d = new Database(file);
+  aplicarChave(d, hex);
+  if (!existia || estaLegivel(d)) {
+    return { db: d, estado: protegida ? 'ok' : 'ok-chave-sem-safeStorage' };
+  }
+
+  // Não abriu com a chave: ou é texto puro (0.6.1 e anteriores) ou é outra chave.
+  d.close();
+  const plain = new Database(file);
+  if (!estaLegivel(plain)) {
+    plain.close();
+    throw new Error('store.db ilegível com a chave atual e também sem chave — store.key trocada?');
+  }
+
+  console.warn('[db] store.db em texto puro — cifrando no lugar (uma vez só)');
+  try {
+    // rekey precisa do arquivo inteiro: sai do WAL (checkpoint + remove -wal/-shm),
+    // cifra, e o WAL volta em getDb().
+    plain.pragma('journal_mode = DELETE');
+    plain.pragma(`rekey = '${hex}'`);
+    plain.close();
+  } catch (err) {
+    try { plain.close(); } catch { /* já fechado */ }
+    const motivo = (err as Error).message;
+    console.error('[db] falha ao cifrar store.db — seguindo em texto puro:', motivo);
+    const aberto = new Database(file);
+    return { db: aberto, estado: `failed:${motivo.slice(0, 120)}` };
+  }
+
+  d = new Database(file);
+  aplicarChave(d, hex);
+  if (!estaLegivel(d)) {
+    d.close();
+    throw new Error('store.db não abre depois do rekey — dado local em risco, não prosseguir');
+  }
+  console.log('[db] store.db cifrado com sucesso');
+  return { db: d, estado: 'ok-migrado' };
+}
 
 export function getDb(): Database.Database {
   if (db) return db;
 
   const dir = app.getPath('userData');
   fs.mkdirSync(dir, { recursive: true });
-  db = new Database(path.join(dir, 'store.db'));
+  const aberto = abrirCifrado(path.join(dir, 'store.db'));
+  db = aberto.db;
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
 
@@ -112,6 +187,7 @@ export function getDb(): Database.Database {
   }
 
   if (!getMeta('device_id')) setMeta('device_id', crypto.randomUUID());
+  setMeta('db_encryption', aberto.estado);
 
   return db;
 }

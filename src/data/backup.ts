@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3-multiple-ciphers';
 import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,6 +13,11 @@ import { getDb, getMeta, setMeta } from './db';
  *
  * A nuvem continua sendo o backup principal; isto protege a janela de dados
  * offline ainda não sincronizados e permite rollback de update problemático.
+ *
+ * Desde a cifra do store.db (L-24), o snapshot sai cifrado com a MESMA chave
+ * (store.key): a API de backup copia páginas já cifradas. Sem o store.key do
+ * mesmo PC o .db não abre. `conferirCifrado` confirma isso a cada snapshot e
+ * grita no log se sair em texto puro — é o sinal que o teste em Windows precisa.
  */
 
 const DAILY_KEEP = 7;
@@ -38,10 +44,27 @@ function rotate(prefix: string, keep: number): void {
   }
 }
 
+/** true se o arquivo NÃO abre sem chave (ou seja, está cifrado). */
+function conferirCifrado(dest: string): boolean {
+  let semChave: Database.Database | null = null;
+  try {
+    semChave = new Database(dest, { readonly: true });
+    semChave.prepare('SELECT count(*) AS n FROM sqlite_master').get();
+    return false; // leu sem chave: está em texto puro
+  } catch {
+    return true;
+  } finally {
+    try { semChave?.close(); } catch { /* nada */ }
+  }
+}
+
 async function snapshot(prefix: string, keep: number): Promise<string | null> {
   const dest = path.join(backupsDir(), `${prefix}-${stamp()}.db`);
   try {
     await getDb().backup(dest);
+    if (!conferirCifrado(dest)) {
+      console.warn(`[backup] ${path.basename(dest)} saiu em TEXTO PURO — a cifra do store.db não está valendo`);
+    }
     rotate(prefix, keep);
     console.log(`[backup] snapshot criado: ${path.basename(dest)}`);
     return dest;
