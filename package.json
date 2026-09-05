@@ -14,7 +14,7 @@
     "dist:dir": "npm run build:main && electron-builder --dir"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3-multiple-ciphers": "^12.11.1",
     "electron-updater": "^6.3.9",
     "undici": "^7.2.0"
   },
