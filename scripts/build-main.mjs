@@ -1,5 +1,9 @@
 import { build } from 'esbuild';
 
+// Mesma raiz do build:app (ver scripts/build-app-server.mjs): a notinha tem que
+// sair do mesmo commit do painel embutido.
+const webRoot = process.env.ALINHAFOOD_WEB_ROOT || '../Alinhafood 01';
+
 const shared = {
   bundle: true,
   platform: 'node',
@@ -33,7 +37,7 @@ await build({
   // resolve os imports '@/' da Alinhafood 01 dentro do próprio projeto dela.
   // `@alinhafood/shared` é o pacote de regras puras da Alinhafood 01 (resolvido
   // lá por `paths` do tsconfig, sem node_modules) — a notinha importa dele.
-  alias: { '@': '../Alinhafood 01', '@alinhafood/shared': '../Alinhafood 01/packages/shared/src' },
+  alias: { '@': webRoot, '@alinhafood/shared': `${webRoot}/packages/shared/src` },
 });
 
 console.log('[build-main] dist/main.js, dist/preload.js e dist/receipt-lib.js gerados');
