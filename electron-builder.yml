@@ -24,6 +24,33 @@ win:
       arch: [x64]
   # Sem code signing por enquanto — o SmartScreen exibirá aviso de editor
   # desconhecido na primeira instalação (documentado no onboarding).
+  #
+  # ⚠️ ARMADILHA: hoje NENHUMA atualização tem a assinatura conferida, e
+  # trocar só esta linha para `true` não muda isso. O electron-updater confere
+  # o `publisherName` gravado no app-update.yml da versão INSTALADA; o build
+  # só grava esse nome quando há certificado (e este valor não é `false`).
+  # Sem certificado não há nome, e a conferência é pulada — `false` fica para
+  # deixar explícito que não há verificação, não por quebrar algo.
+  # (Conferido em node_modules/electron-updater/out/NsisUpdater.js →
+  # verifySignature, e app-builder-lib/out/publish/PublishManager.js.)
+  #
+  # O risco de ficar assim: a única prova de origem da atualização é o
+  # sha512 do latest.yml, que mora no MESMO release do GitHub que o
+  # instalador. Quem conseguir publicar um release em
+  # Willianbarrosoficial/alinhafood-desktop (token vazado, conta invadida)
+  # troca o .exe e o latest.yml juntos, e o instalador roda como
+  # ADMINISTRADOR (perMachine: true) em todos os PCs das lojas na próxima
+  # verificação. Até haver certificado, proteja a conta: 2FA, token de
+  # publicação com escopo só deste repositório e de vida curta.
+  #
+  # Caminho para fechar: certificado de assinatura de código (OV ou EV, em
+  # nome da empresa); assinar no build (CSC_LINK / CSC_KEY_PASSWORD, com o
+  # .pfx fora do repositório — o .gitignore barra *.pfx e *.p12) e, no MESMO
+  # build, `verifyUpdateCodeSignature: true` (ou retirar a linha). A proteção
+  # começa nas lojas que instalarem essa primeira versão assinada; as que
+  # estão numa versão sem nome gravado aceitam qualquer coisa até lá.
+  # Depois disso, trocar de certificado com outro nome (CN) trava a
+  # atualização: liste os dois em `publisherName` antes da troca.
   verifyUpdateCodeSignature: false
 
 nsis:
