@@ -89,6 +89,23 @@ test('escrita de outra origem é recusada mesmo com a sessão, inclusive no prox
   assert.equal(nulo.ok, false);
 });
 
+test('/api/auth/session exige a sessão local (grava e apaga a sessão do sync e do PIN)', () => {
+  for (const [url, method] of [
+    ['/api/auth/session', 'POST'],
+    ['/api/auth/session', 'DELETE'],
+    ['/api/auth/session', 'GET'],
+    ['/api/auth/session?x=1', 'POST'],
+  ]) {
+    const sem = checkRequest(req(url, { method }), PORT, SECRET);
+    assert.equal(sem.ok, false, `${method} ${url}`);
+    assert.equal(sem.status, 401, `${method} ${url}`);
+    const com = checkRequest(req(url, { method, origin: `http://127.0.0.1:${PORT}`, cookie }), PORT, SECRET);
+    assert.equal(com.ok, true, `${method} ${url}`);
+  }
+  // As outras rotas de /api/auth seguem como antes (proxy para a nuvem).
+  assert.equal(checkRequest(req('/api/auth/select-restaurant', { method: 'POST' }), PORT, SECRET).ok, true);
+});
+
 test('escrita sem Origin (print agent, app-server) segue para as rotas não-locais', () => {
   assert.equal(checkRequest(req('/api/print/jobs/abc', { method: 'PATCH' }), PORT, SECRET).ok, true);
 });

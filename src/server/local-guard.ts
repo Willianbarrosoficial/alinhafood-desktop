@@ -16,7 +16,8 @@ import type http from 'node:http';
  *  2. Origin: escrita vinda de página de outra origem é recusada antes de
  *     qualquer coisa — inclusive antes do proxy, que reescreve o Origin para
  *     o da nuvem e apagaria a evidência.
- *  3. Sessão local: /api/local/* exige um cookie com segredo aleatório gerado
+ *  3. Sessão local: /api/local/* (e /api/auth/session — ver
+ *     routeNeedsLocalSession) exige um cookie com segredo aleatório gerado
  *     a cada boot e entregue SÓ à janela do app (main.ts grava no cookie jar
  *     do Electron antes do loadURL). Navegador comum não tem esse cookie.
  */
@@ -92,6 +93,25 @@ export function localRouteIsPublic(url: string): boolean {
   return path === '/api/local/jwks';
 }
 
+/**
+ * /api/auth/session também exige a sessão local, embora não seja /api/local.
+ * O gateway intercepta essa rota (handleAuthSession): um POST aceito pela
+ * nuvem GRAVA o access_token como a sessão do sync e do PIN de emergência, e
+ * um DELETE com internet a APAGA. Sem a sessão local, qualquer programa do PC
+ * ou outro usuário do Windows (sem Origin, a barreira 2 não pega) trocava a
+ * sessão guardada por uma conta dele — o PIN de emergência passaria a abrir a
+ * loja errada — ou apagava a sessão de que o PIN depende no apagão.
+ * A janela do app manda o cookie (fetch same-origin), então nada muda para ela.
+ *
+ * ⚠️ ARMADILHA: o casamento é por PREFIXO, igual ao roteador do gateway
+ * (`url.startsWith('/api/auth/session')`). Trocar por igualdade exata deixa
+ * `/api/auth/session?x=1` passar sem sessão e ainda cair no mesmo handler.
+ */
+export function routeNeedsLocalSession(url: string): boolean {
+  if (url.startsWith('/api/local/')) return !localRouteIsPublic(url);
+  return url.startsWith('/api/auth/session');
+}
+
 export type GuardVerdict = { ok: true } | { ok: false; status: number; error: string };
 
 export function checkRequest(
@@ -108,7 +128,7 @@ export function checkRequest(
     return { ok: false, status: 403, error: 'origin_not_allowed' };
   }
   const url = req.url ?? '/';
-  if (url.startsWith('/api/local/') && !localRouteIsPublic(url)) {
+  if (routeNeedsLocalSession(url)) {
     if (!hasLocalSession(req.headers.cookie, secret)) {
       return { ok: false, status: 401, error: 'local_session_required' };
     }
