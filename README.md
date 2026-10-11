@@ -32,6 +32,30 @@ JWT_SECRET) entra neste projeto — o build aborta se encontrar uma no
 
 **Atualizar o Desktop depois de mudanças no painel** = repetir 3, 4 e 5 e gerar versão nova: o .exe embute um
 build do painel, o agente de impressão e a notinha — nada disso acompanha o deploy da nuvem sozinho.
+O agente embutido também não: só a bandeja do agente avulso se atualiza sozinha, o Service que vai
+dentro do .exe fica na versão com que foi empacotado.
+
+### Build de versão para as lojas — sempre de cópia limpa
+
+As pastas irmãs costumam ter trabalho de outras sessões por cima (e a do agente, um `publish/` antigo).
+Para o .exe que vai para as lojas, monte painel, notinha e agente a partir da `main` de cada repo:
+
+```bash
+git -C "../Alinhafood 01" fetch origin main
+git -C "../Alinhafood 01" worktree add --detach /tmp/af-web origin/main
+(cd /tmp/af-web && npm ci)
+git -C "../Alinhafood Print Agent" fetch origin main
+git -C "../Alinhafood Print Agent" worktree add --detach /tmp/af-agent origin/main
+
+export ALINHAFOOD_WEB_ROOT=/tmp/af-web ALINHAFOOD_AGENT_ROOT=/tmp/af-agent
+npm run build:app
+node scripts/build-print-helper.mjs --publish   # imprime a versão do agente que entrou
+npm run build:main
+npm run dist
+```
+
+Anote no commit da versão o commit do painel e a versão do agente embutidos — é o que diz, depois,
+o que a loja está rodando. Ao terminar: `git worktree remove /tmp/af-web` e `/tmp/af-agent`.
 
 ## Publicação / auto-update
 
