@@ -7,3 +7,11 @@ resources/desktop-config.json
 *.log
 .DS_Store
 resources/print-agent/
+
+# Segredos — nunca no repositório. O exemplo versionado continua entrando.
+.env*
+!.env.desktop.example
+# Certificado de assinatura de código (quando houver): fica fora do repo,
+# vai para o build por CSC_LINK / CSC_KEY_PASSWORD.
+*.pfx
+*.p12
