@@ -4,6 +4,13 @@ import { Client } from 'undici';
 import type { DesktopConfig } from '../config';
 import type { HealthMonitor } from '../runtime/health-monitor';
 import { saveAdminToken, clearAdminToken } from '../runtime/session-store';
+import {
+  checkRequest,
+  isAllowedImageSource,
+  newLocalSessionSecret,
+  PinAttemptLimiter,
+  stripLocalSessionCookie,
+} from './local-guard';
 
 /**
  * Gateway local — porta pública do desktop (3737).
@@ -100,6 +107,8 @@ export interface GatewayOptions {
 
 export interface GatewayHandle {
   server: http.Server;
+  /** Segredo da sessão local — main.ts grava no cookie jar da janela (C-02). */
+  localSessionSecret: string;
   close: () => Promise<void>;
 }
 
@@ -132,6 +141,8 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
   const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
   const sseClients = new Set<http.ServerResponse>();
+  const localSessionSecret = newLocalSessionSecret();
+  const pinLimiter = new PinAttemptLimiter();
 
   health.on('change', (mode: string) => {
     for (const res of sseClients) {
@@ -151,6 +162,10 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       headers[name] = value;
     }
     headers['host'] = targetHost;
+    // O segredo da sessão local nunca sai da máquina nem chega ao app-server.
+    const cookie = stripLocalSessionCookie(headers['cookie']);
+    if (cookie === undefined) delete headers['cookie'];
+    else headers['cookie'] = cookie;
     if (rewriteOrigin) {
       if (headers['origin']) headers['origin'] = cloud.origin;
       if (typeof headers['referer'] === 'string') {
@@ -280,12 +295,20 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       return;
     }
     try {
+      const espera = pinLimiter.retryAfterSeconds();
+      if (espera > 0) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': String(espera) });
+        res.end(JSON.stringify({ error: `Muitas tentativas. Tente de novo em ${espera} segundos.` }));
+        return;
+      }
       const body = JSON.parse((await readBody(req)).toString('utf8')) as { pin?: string };
       if (!body.pin || !auth.verifyPin(body.pin)) {
+        pinLimiter.recordFailure();
         res.writeHead(401, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'PIN incorreto.' }));
         return;
       }
+      pinLimiter.recordSuccess();
       const token = auth.storedToken();
       if (!token) {
         res.writeHead(409, { 'content-type': 'application/json' });
@@ -337,7 +360,14 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       return;
     }
 
-    if (url === '/api/local/status' || url === '/desktop/status') {
+    // Detecção pelo print agent C# (sem sessão local): só identidade e modo.
+    if (url === '/desktop/status') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ app: 'alinhafood-desktop', version, mode: health.status().mode }));
+      return;
+    }
+
+    if (url === '/api/local/status') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -439,6 +469,13 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
+
+    const verdict = checkRequest(req, config.gatewayPort, localSessionSecret);
+    if (!verdict.ok) {
+      res.writeHead(verdict.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: verdict.error }));
+      return;
+    }
 
     // Dono de várias empresas: o painel grava a loja escolhida nesse cookie e
     // toda chamada /api/ o carrega. Capturar aqui (e não no login) acompanha a
@@ -643,13 +680,21 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       void (async () => {
         try {
           const original = new URL(url, localOrigin).searchParams.get('u');
-          const img = original ? await options.serveImage!(original) : null;
+          const img =
+            original && isAllowedImageSource(original) ? await options.serveImage!(original) : null;
           if (!img) {
             res.writeHead(404);
             res.end();
             return;
           }
-          res.writeHead(200, { 'content-type': img.contentType, 'cache-control': 'max-age=86400' });
+          // Servido na origem do painel: nada aqui pode virar documento ativo
+          // (um SVG com <script> aberto direto rodaria com os poderes da janela).
+          res.writeHead(200, {
+            'content-type': img.contentType,
+            'cache-control': 'max-age=86400',
+            'x-content-type-options': 'nosniff',
+            'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          });
           fs.createReadStream(img.path).pipe(res);
         } catch {
           res.writeHead(404);
@@ -691,6 +736,7 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       console.log(`[gateway] escutando em ${localOrigin} → nuvem ${cloud.origin}`);
       resolve({
         server,
+        localSessionSecret,
         close: () =>
           new Promise<void>((done) => {
             server.close(() => done());

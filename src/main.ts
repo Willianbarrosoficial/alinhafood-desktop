@@ -1,8 +1,9 @@
-import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, session, shell } from 'electron';
 import path from 'node:path';
 import { loadConfig } from './config';
 import { startAppServer, type AppServerHandle } from './server/boot';
 import { startGateway, type GatewayHandle } from './server/gateway';
+import { LOCAL_SESSION_COOKIE, isSafeExternalUrl } from './server/local-guard';
 import { findBindablePort } from './server/ports';
 import { HealthMonitor } from './runtime/health-monitor';
 import { PullEngine } from './sync/pull';
@@ -180,7 +181,9 @@ function createWindow(localOrigin: string) {
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith(localOrigin)) {
-      void shell.openExternal(url);
+      // Só http(s) vai para o navegador do sistema: file:, ms-*, search-ms: e
+      // afins abririam programas do Windows a partir de um link na página.
+      if (isSafeExternalUrl(url)) void shell.openExternal(url);
       return { action: 'deny' };
     }
     return { action: 'allow' };
@@ -346,6 +349,15 @@ async function boot() {
     startHelper();
 
     const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
+    // Sessão local (C-02): o gateway só atende /api/local/* com este cookie.
+    // Sem expiração = cookie de sessão, só em memória; HttpOnly tira do JS.
+    await session.defaultSession.cookies.set({
+      url: localOrigin,
+      name: LOCAL_SESSION_COOKIE,
+      value: gateway.localSessionSecret,
+      httpOnly: true,
+      sameSite: 'strict',
+    });
     createWindow(localOrigin);
     ensureAutostartDefault();
     setupTray(localOrigin);
