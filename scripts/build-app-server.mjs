@@ -12,7 +12,13 @@ import { fileURLToPath } from 'node:url';
  */
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const webRoot = path.resolve(desktopRoot, '..', 'Alinhafood 01');
+// ALINHAFOOD_WEB_ROOT aponta para uma cópia LIMPA da main (git worktree). A
+// pasta irmã costuma estar com trabalho de outras sessões por cima, e foi assim
+// que a 0.5.0 saiu com landing/SEO não commitados dentro do .exe. O build:main
+// lê a mesma variável, para painel e notinha saírem do mesmo commit.
+const webRoot = process.env.ALINHAFOOD_WEB_ROOT
+  ? path.resolve(process.env.ALINHAFOOD_WEB_ROOT)
+  : path.resolve(desktopRoot, '..', 'Alinhafood 01');
 const envFile = path.join(desktopRoot, '.env.desktop');
 const outDir = path.join(desktopRoot, 'resources', 'app-server');
 

@@ -489,8 +489,24 @@ export function updateLocalPrintJob(
   status: string,
   errorMessage?: string,
   scope?: AgentScope,
+  aguardandoImpressora = false,
 ): boolean {
   const filtro = scope ? scopeClause(scope) : null;
+  // ⚠️ ARMADILHA: 'pending' volta para a fila — não é "falhou". Até a 0.6 tudo
+  // que não fosse 'completed' virava 'failed', e o agente 1.17, que devolve a
+  // comanda como 'pending' quando a impressora está sem papel/offline, perdia a
+  // comanda de vez no Desktop offline. `aguardandoImpressora` devolve a
+  // tentativa que o claim somou (mesma regra da nuvem, PATCH /api/print/jobs).
+  if (status === 'pending') {
+    const pend = getDb()
+      .prepare(
+        `UPDATE print_jobs SET status = 'pending', claimed_at = NULL, error_message = ?,
+           attempts = CASE WHEN ? = 1 THEN MAX(0, attempts - 1) ELSE attempts END
+         WHERE id = ?${filtro ? ` AND ${filtro.sql}` : ''}`,
+      )
+      .run(errorMessage ?? null, aguardandoImpressora ? 1 : 0, jobId, ...(filtro?.params ?? []));
+    return pend.changes > 0;
+  }
   const result = getDb()
     .prepare(`UPDATE print_jobs SET status = ?, error_message = ? WHERE id = ?${filtro ? ` AND ${filtro.sql}` : ''}`)
     .run(status === 'completed' ? 'completed' : 'failed', errorMessage ?? null, jobId, ...(filtro?.params ?? []));

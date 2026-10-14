@@ -100,6 +100,7 @@ export interface GatewayOptions {
       status: string,
       errorMessage?: string,
       scope?: { agentId: string; sectorIds: string[]; slugs: string[] },
+      aguardandoImpressora?: boolean,
     ) => boolean;
     pendingCount: () => number;
   };
@@ -643,12 +644,14 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
             const body = JSON.parse((await readBody(req)).toString('utf8')) as {
               status?: string;
               error_message?: string;
+              aguardando_impressora?: boolean;
             };
             const isLocal = options.print!.update(
               patchMatch[1]!,
               body.status ?? 'failed',
               body.error_message,
               agentScope ?? undefined,
+              body.aguardando_impressora === true,
             );
             if (isLocal) {
               res.writeHead(200, { 'content-type': 'application/json' });
@@ -702,6 +705,32 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
         }
       })();
       return;
+    }
+
+    // ⚠️ ARMADILHA: /api/print/agent/* (agente 1.12+: setores, impressoras,
+    // teste em imagem e, desde a 1.17, o ESTADO da impressora — "sem papel")
+    // não pode cair no repasse genérico lá embaixo. O helper embutido autentica
+    // com o token INTERNO, que a nuvem não conhece: repassado como veio, tudo
+    // voltava 401 e o aviso de impressora sem papel nunca chegava ao painel.
+    // Mesma troca de /api/print/jobs: interno → token ATUAL do restaurante.
+    if (url.startsWith('/api/print/agent/') && options.print) {
+      const auth = req.headers.authorization ?? '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+      const cloudToken = options.print.cloudToken();
+      if (token && token === options.print.expectedToken()) {
+        if (!health.isOnline()) {
+          offlineResponse(res);
+          return;
+        }
+        if (!cloudToken) {
+          res.writeHead(401, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Token de impressão ainda não sincronizado' }));
+          return;
+        }
+        void proxy(req, res, cloudClient, cloud.host, true, undefined, cloudToken);
+        return;
+      }
+      // Token de nuvem ou por computador: segue com o próprio Bearer (abaixo).
     }
 
     if (url.startsWith('/api/local/') || url === '/desktop/status') {
