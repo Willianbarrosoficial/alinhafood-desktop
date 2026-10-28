@@ -51,6 +51,8 @@ export interface GatewayOptions {
   /** Loja ativa do painel, lida do cookie `admin_restaurant_id` de cada
    *  chamada proxiada — é o que diz ao sync QUAL empresa espelhar (0.5.0). */
   noteActiveRestaurant?: (restaurantId: string) => void;
+  /** Lojas no espelho local (id + slug): plano B do `/admin` sem internet. */
+  lojasDoEspelho?: () => Array<{ id?: string; slug?: string }>;
   /** Criação de pedido offline (Fase 3) */
   localCreateOrder?: (body: unknown) =>
     | { ok: true; orderId: string; orderNumber: string }
@@ -754,8 +756,83 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       return;
     }
 
+    // ⚠️ ARMADILHA: o painel sem loja no endereço (/admin, /kds — o "portal",
+    // desde 22/08/2026) descobre a loja NO SERVIDOR com a chave service_role
+    // (lib/server/portal-loja.ts), que o Desktop não tem e nunca pode ter. Lá
+    // dentro a página quebrava com "supabaseKey is required" e o login caía em
+    // "Algo deu errado" (achado só em 28/10, na primeira vez que alguém entrou
+    // num Desktop desde a 0.6.0). O login do painel manda para /admin em
+    // localhost (urlPainel), então quem resolve é o gateway: troca por
+    // /<slug>/admin, que só confere a sessão e também abre sem internet.
+    // Não "simplificar" deixando o /admin passar: ele volta a quebrar.
+    const portal = req.method === 'GET'
+      ? /^\/(admin|kds)(\/(?!login\b)[\w-]+)?\/?(\?.*)?$/.exec(url)
+      : null;
+    if (portal) {
+      void redirecionarParaLoja(req, res, portal[1]!, portal[2] ?? '', portal[3] ?? '');
+      return;
+    }
+
     void proxy(req, res, appServerClient, `127.0.0.1:${config.appServerPort}`, false);
   });
+
+  /** Cookie da requisição pelo nome (os do painel chegam reescritos para a origem local). */
+  function cookieDe(req: http.IncomingMessage, nome: string): string | null {
+    const m = new RegExp(`(?:^|;\\s*)${nome}=([^;]+)`).exec(req.headers.cookie ?? '');
+    return m ? decodeURIComponent(m[1]!) : null;
+  }
+
+  /**
+   * Lojas do dono, na ordem do portal (principal primeiro). Pergunta ao banco
+   * com o PRÓPRIO token do dono — a RLS só devolve as lojas dele —, e sem
+   * resposta usa o espelho local. null = não deu para saber.
+   */
+  async function lojasDoDono(token: string): Promise<Array<{ id?: string; slug?: string }> | null> {
+    let sub: string | null = null;
+    try {
+      sub = (JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as { sub?: string }).sub ?? null;
+    } catch {
+      sub = null;
+    }
+    if (sub && health.isOnline()) {
+      try {
+        const q = `select=id,slug&owner_id=eq.${encodeURIComponent(sub)}&active=eq.true&order=empresa_principal.desc,created_at.asc`;
+        const r = await fetch(`${config.supabaseUrl}/rest/v1/restaurants?${q}`, {
+          headers: { apikey: config.supabaseAnonKey, Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(6_000),
+        });
+        if (r.ok) return (await r.json()) as Array<{ id?: string; slug?: string }>;
+        console.warn(`[gateway] lojas do dono: HTTP ${r.status}`);
+      } catch (err) {
+        console.warn('[gateway] lojas do dono sem resposta:', (err as Error).message);
+      }
+    }
+    const espelho = options.lojasDoEspelho?.() ?? [];
+    return espelho.length > 0 ? espelho : null;
+  }
+
+  async function redirecionarParaLoja(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    base: string,
+    resto: string,
+    query: string,
+  ) {
+    const token = cookieDe(req, 'alinhafood_admin_access_token');
+    const lojas = token ? await lojasDoDono(token) : null;
+    // Sem sessão ou sem saber as lojas: deixa a página seguir como antes (o
+    // middleware manda ao login quando falta sessão).
+    if (!lojas) {
+      void proxy(req, res, appServerClient, `127.0.0.1:${config.appServerPort}`, false);
+      return;
+    }
+    const preferida = cookieDe(req, 'alinhafood_portal_loja') ?? cookieDe(req, 'admin_restaurant_id');
+    const comSlug = lojas.filter((l) => l.slug);
+    const loja = comSlug.find((l) => l.id === preferida) ?? (comSlug.length === 1 || base === 'kds' ? comSlug[0] : undefined);
+    const destino = loja ? `/${loja.slug}/${base}${resto}${query}` : '/empresas';
+    res.writeHead(302, { location: destino, 'cache-control': 'no-store' });
+    res.end();
+  }
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

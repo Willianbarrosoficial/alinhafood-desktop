@@ -303,6 +303,7 @@ async function boot() {
       // espelha e que os pedidos offline carregam. Dono de uma loja só nunca
       // muda; dono de várias troca pelo seletor e o espelho acompanha no
       // próximo ciclo.
+      lojasDoEspelho: () => readMirrorTable<{ id?: string; slug?: string }>('restaurants'),
       noteActiveRestaurant: (id) => {
         if (getMeta('active_restaurant_id') === id) return;
         setMeta('active_restaurant_id', id);
