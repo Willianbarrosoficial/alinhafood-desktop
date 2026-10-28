@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,6 +44,10 @@ const arquivos = [
   { local: path.join(dir, 'latest.yml'), nome: 'latest.yml', tipo: 'text/yaml' },
 ];
 
+function commitDoBuild() {
+  return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8' }).trim();
+}
+
 function token() {
   const env = fs.readFileSync(path.join(root, '.env.desktop'), 'utf8');
   const t = env.match(/^GH_TOKEN=(.+)$/m)?.[1]?.trim();
@@ -87,7 +92,9 @@ async function rascunho() {
   if (!rel) {
     rel = await gh(`${API}/releases`, {
       method: 'POST',
-      body: JSON.stringify({ tag_name: tag, target_commitish: 'main', name: tag, draft: true, body: `Alinhafood Desktop ${versao}` }),
+      // O commit do build, não 'main': a versão nasce numa branch release/X.Y.Z
+      // que só entra na main depois, e a tag sairia sem o código do .exe.
+      body: JSON.stringify({ tag_name: tag, target_commitish: commitDoBuild(), name: tag, draft: true, body: `Alinhafood Desktop ${versao}` }),
     });
     console.log(`[release] rascunho ${tag} criado (id ${rel.id})`);
   }
