@@ -82,7 +82,11 @@ function conferirPacote() {
 
 async function releaseDaTag() {
   const lista = await gh(`${API}/releases?per_page=30`);
-  return lista.find((r) => r.tag_name === tag) ?? null;
+  // ⚠️ ARMADILHA: um PATCH num rascunho sem `tag_name` (ex.: só trocar o
+  // target_commitish) faz o GitHub esquecer a tag — ela vira "untagged-…" e só
+  // o nome continua v0.8.0. Por isso procura também pelo nome, e o --publicar
+  // regrava a tag.
+  return lista.find((r) => r.tag_name === tag) ?? lista.find((r) => r.draft && r.name === tag) ?? null;
 }
 
 async function rascunho() {
@@ -120,7 +124,11 @@ async function publicar() {
   if (!rel.draft) throw new Error(`${tag} já está publicado`);
   const faltando = arquivos.filter((a) => !rel.assets.some((x) => x.name === a.nome && x.state === 'uploaded'));
   if (faltando.length) throw new Error(`rascunho sem ${faltando.map((a) => a.nome).join(', ')}`);
-  await gh(`${API}/releases/${rel.id}`, { method: 'PATCH', body: JSON.stringify({ draft: false, make_latest: 'true' }) });
+  const publicado = await gh(`${API}/releases/${rel.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ tag_name: tag, target_commitish: rel.target_commitish, draft: false, make_latest: 'true' }),
+  });
+  if (publicado.tag_name !== tag) throw new Error(`publicado com a tag ${publicado.tag_name}, esperado ${tag} — conferir no GitHub`);
   const feed = await fetch(`https://github.com/${OWNER}/${REPO}/releases/latest/download/latest.yml`).then((r) => r.text());
   console.log(`[release] ${tag} publicado. Feed do auto-update agora diz: ${feed.match(/^version:.*$/m)?.[0]}`);
 }
