@@ -15,9 +15,17 @@ import { getDb, getMeta, setMeta } from './db';
  * offline ainda não sincronizados e permite rollback de update problemático.
  *
  * Desde a cifra do store.db (L-24), o snapshot sai cifrado com a MESMA chave
- * (store.key): a API de backup copia páginas já cifradas. Sem o store.key do
- * mesmo PC o .db não abre. `conferirCifrado` confirma isso a cada snapshot e
- * grita no log se sair em texto puro — é o sinal que o teste em Windows precisa.
+ * (store.key). Sem o store.key do mesmo PC o .db não abre. `conferirCifrado`
+ * confirma isso a cada snapshot e grita no log se sair em texto puro — é o
+ * sinal que o teste em Windows precisa.
+ *
+ * ⚠️ ARMADILHA: o snapshot é `VACUUM INTO`, não `db.backup()`. Com o banco
+ * cifrado, o `.backup()` do better-sqlite3 abre o destino SEM chave e o SQLite3
+ * Multiple Ciphers recusa ("backup is not supported with incompatible source
+ * and target databases") — da 0.7.0 até a 0.8.0 nenhum backup foi gravado e o
+ * erro só aparecia no log. `VACUUM INTO` grava com a cifra e a chave do banco
+ * aberto (conferido 27/10/2026: sem chave "file is not a database", com a
+ * chave lê tudo). Trocar de volta para `.backup()` derruba os backups calado.
  */
 
 const DAILY_KEEP = 7;
@@ -61,7 +69,7 @@ function conferirCifrado(dest: string): boolean {
 async function snapshot(prefix: string, keep: number): Promise<string | null> {
   const dest = path.join(backupsDir(), `${prefix}-${stamp()}.db`);
   try {
-    await getDb().backup(dest);
+    getDb().prepare('VACUUM INTO ?').run(dest);
     if (!conferirCifrado(dest)) {
       console.warn(`[backup] ${path.basename(dest)} saiu em TEXTO PURO — a cifra do store.db não está valendo`);
     }
