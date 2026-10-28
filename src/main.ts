@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, session, shell } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config';
 import { startAppServer, type AppServerHandle } from './server/boot';
@@ -269,7 +270,43 @@ async function setupAutoUpdater() {
   setInterval(check, 6 * 60 * 60 * 1000);
 }
 
+/**
+ * Grava em <userData>/logs/main.log tudo o que o processo principal diz
+ * (portas, gateway, sync, atualização). Até a 0.9.1 isso só ia para o
+ * console, que no Windows instalado ninguém vê — o diagnóstico de uma falha
+ * em campo dependia de reproduzi-la. Passou de 2 MB, vira main.log.1.
+ */
+function gravarRegistroEmArquivo() {
+  const arquivo = path.join(app.getPath('userData'), 'logs', 'main.log');
+  try {
+    fs.mkdirSync(path.dirname(arquivo), { recursive: true });
+    if (fs.existsSync(arquivo) && fs.statSync(arquivo).size > 2 * 1024 * 1024) fs.renameSync(arquivo, `${arquivo}.1`);
+  } catch {
+    return;
+  }
+  const texto = (a: unknown) => {
+    if (a instanceof Error) return a.stack ?? a.message;
+    if (typeof a === 'string') return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  };
+  for (const nivel of ['log', 'warn', 'error'] as const) {
+    const original = console[nivel].bind(console);
+    console[nivel] = (...args: unknown[]) => {
+      original(...args);
+      try {
+        fs.appendFileSync(arquivo, `${new Date().toISOString()} [${nivel}] ${args.map(texto).join(' ')}\n`);
+      } catch {
+        /* registro é best-effort */
+      }
+    };
+  }
+  // Num Windows ARM o programa x64 roda emulado e process.arch diz "x64"; o
+  // identificador do processador é o que conta a verdade ("ARMv8…").
+  console.log(`[boot] Alinhafood Desktop ${app.getVersion()} · ${process.platform}/${process.arch} · ${process.env.PROCESSOR_IDENTIFIER ?? ''}`);
+}
+
 async function boot() {
+  gravarRegistroEmArquivo();
   try {
     const config = loadConfig();
     getDb(); // abre/migra o SQLite local cedo — falha aqui deve abortar o boot

@@ -136,6 +136,50 @@ function launchOnce(serverJs: string, port: number, config: DesktopConfig): Prom
   });
 }
 
+/**
+ * Religa o servidor interno se ele cair depois de pronto. Antes, uma queda
+ * deixava a janela respondendo "Servidor local não respondeu" até alguém
+ * fechar e abrir o programa — e quem está no balcão não sabe que é isso.
+ *
+ * Mesma porta (a do processo que caiu fica livre, e o gateway já aponta para
+ * ela). Espera crescente entre tentativas (1 s, 2 s, 4 s… até 30 s) para um
+ * erro que derruba no arranque não virar laço apertado.
+ */
+function vigiar(primeiro: ChildProcess, serverJs: string, port: number, config: DesktopConfig): AppServerHandle {
+  let atual = primeiro;
+  let parando = false;
+
+  const religar = (tentativa: number) => {
+    if (parando) return;
+    const espera = Math.min(30_000, 1_000 * 2 ** Math.min(tentativa, 5));
+    pushLog(`[app-server] caiu; religando em ${espera} ms (tentativa ${tentativa + 1})`);
+    setTimeout(() => {
+      if (parando) return;
+      launchOnce(serverJs, port, config)
+        .then((novo) => {
+          atual = novo;
+          pushLog(`[app-server] religado em http://127.0.0.1:${port}`);
+          novo.once('exit', () => religar(0));
+        })
+        .catch((err: Error) => {
+          pushLog(`[app-server] religar falhou: ${err.message}`);
+          religar(tentativa + 1);
+        });
+    }, espera);
+  };
+
+  primeiro.once('exit', () => religar(0));
+  return {
+    get child() {
+      return atual;
+    },
+    stop: () => {
+      parando = true;
+      atual.kill();
+    },
+  };
+}
+
 export async function startAppServer(config: DesktopConfig): Promise<AppServerHandle> {
   const serverJs = findServerJs(appServerDir());
   if (!serverJs) {
@@ -157,7 +201,7 @@ export async function startAppServer(config: DesktopConfig): Promise<AppServerHa
       const child = await launchOnce(serverJs, port, config);
       config.appServerPort = port;
       console.log(`[app-server] pronto em http://127.0.0.1:${port}`);
-      return { child, stop: () => child.kill() };
+      return vigiar(child, serverJs, port, config);
     } catch (err) {
       lastErr = err as Error;
       console.error(`[app-server] tentativa na porta ${port} falhou: ${lastErr.message}`);

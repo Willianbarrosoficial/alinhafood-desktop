@@ -133,13 +133,32 @@ function readBody(req: http.IncomingMessage, limit = 1024 * 1024): Promise<Buffe
   });
 }
 
+/** Mostrada quando o servidor interno não respondeu a uma página: recarrega sozinha. */
+const TELA_ABRINDO = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="3"><title>Alinhafood</title>
+<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f8f9fa;color:#0f172a}
+.c{text-align:center}.r{width:28px;height:28px;margin:0 auto 18px;border:3px solid #e2e8f0;
+border-top-color:#1a56db;border-radius:50%;animation:g .9s linear infinite}
+@keyframes g{to{transform:rotate(360deg)}}h1{font-size:18px;margin:0 0 6px}
+p{margin:0;color:#475569;font-size:14px}</style></head>
+<body><div class="c"><div class="r"></div><h1>Abrindo o Alinhafood…</h1>
+<p>Na primeira vez depois de instalar ou atualizar, pode levar um minuto.</p></div></body></html>`;
+
 export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
   const { config, version, health } = options;
   const cloud = new URL(config.cloudUrl);
   const cloudClient = new Client(cloud.origin, { bodyTimeout: 0, headersTimeout: 30_000 });
+  // ⚠️ ARMADILHA: 3 minutos, não 30 s. A primeira tela depois de instalar ou
+  // atualizar é renderizada a frio — sem cache, com o antivírus do Windows
+  // conferindo cada arquivo do painel na primeira leitura e, em Windows ARM, o
+  // programa x64 emulado. Com 30 s o gateway desistia no meio e a janela
+  // mostrava {"error":"app_server_unavailable"} só na primeira abertura
+  // (visto numa VM Windows ARM em 28/10/2026). É servidor nosso, na mesma
+  // máquina: esperar não custa nada.
   const appServerClient = new Client(`http://127.0.0.1:${config.appServerPort}`, {
     bodyTimeout: 0,
-    headersTimeout: 30_000,
+    headersTimeout: 180_000,
   });
 
   const localOrigin = `http://127.0.0.1:${config.gatewayPort}`;
@@ -249,6 +268,11 @@ export function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
       }
       if (isCloud) {
         offlineResponse(res);
+      } else if (req.method === 'GET' && (req.headers.accept ?? '').includes('text/html')) {
+        // Página pedida pela janela: em vez do JSON cru, uma tela que tenta de
+        // novo sozinha — o servidor interno pode estar subindo ou sendo religado.
+        res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '3' });
+        res.end(TELA_ABRINDO);
       } else {
         res.writeHead(502, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'app_server_unavailable', message: 'Servidor local não respondeu.' }));
