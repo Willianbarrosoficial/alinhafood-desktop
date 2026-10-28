@@ -49,6 +49,22 @@ const arquivos = [
   { local: path.join(dir, 'latest.yml'), nome: 'latest.yml', tipo: 'text/yaml' },
 ];
 
+/**
+ * O latest.yml como ele vai ao GitHub: citando o instalador com HÍFEN.
+ *
+ * ⚠️ ARMADILHA: desde a 0.9.0 o build publica no feed do painel (provider
+ * generic), e com ele o electron-builder escreve no latest.yml o nome LOCAL,
+ * com espaço ("Alinhafood Setup 0.9.0.exe"). Com o provider github ele já
+ * escrevia com hífen. No GitHub o arquivo sobe com hífen, então o yml tem de
+ * citar esse nome — senão os PCs da 0.7.0/0.8.0 procuram um arquivo que não
+ * existe no release e nunca saem da versão deles. Só o nome muda: sha512 e
+ * tamanho são do mesmo instalador.
+ */
+function ymlParaOGithub() {
+  const yml = fs.readFileSync(path.join(dir, 'latest.yml'), 'utf8');
+  return yml.split(path.basename(exeLocal)).join(nomeExe);
+}
+
 function commitDoBuild() {
   return execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8' }).trim();
 }
@@ -74,7 +90,7 @@ function conferirPacote() {
   for (const a of arquivos) {
     if (!fs.existsSync(a.local)) throw new Error(`falta ${path.relative(root, a.local)} — rode o npm run dist`);
   }
-  const yml = fs.readFileSync(path.join(dir, 'latest.yml'), 'utf8');
+  const yml = ymlParaOGithub();
   const ymlVersao = yml.match(/^version:\s*(\S+)/m)?.[1];
   const ymlPath = yml.match(/^path:\s*(\S+)/m)?.[1];
   const ymlSha = yml.match(/^sha512:\s*(\S+)/m)?.[1];
@@ -110,7 +126,7 @@ async function rascunho() {
   for (const a of arquivos) {
     const antigo = rel.assets.find((x) => x.name === a.nome);
     if (antigo) await gh(`${API}/releases/assets/${antigo.id}`, { method: 'DELETE' });
-    const dados = fs.readFileSync(a.local);
+    const dados = a.nome === 'latest.yml' ? Buffer.from(ymlParaOGithub(), 'utf8') : fs.readFileSync(a.local);
     const up = await gh(`https://uploads.github.com/repos/${OWNER}/${REPO}/releases/${rel.id}/assets?name=${encodeURIComponent(a.nome)}`, {
       method: 'POST',
       headers: { 'Content-Type': a.tipo, 'Content-Length': String(dados.length) },
