@@ -68,7 +68,12 @@ nsis:
   shortcutName: Alinhafood
   uninstallDisplayName: Alinhafood Desktop
 
+# O feed de atualização mora no PAINEL (lista DESKTOP_RELEASES em
+# Alinhafood 01/lib/server/desktop-releases.ts) e o instalador no R2 da
+# Cloudflare (download.alinhafood.com.br/desktop/vX.Y.Z/) — o mesmo modelo do
+# Print Agent. Até a 0.8.0 era o GitHub Releases; o main.ts também fixa este
+# endereço em código (setFeedURL), então esta linha é só o que vai para o
+# app-update.yml do pacote.
 publish:
-  provider: github
-  owner: Willianbarrosoficial
-  repo: alinhafood-desktop
+  provider: generic
+  url: https://alinhafood.com.br/api/desktop/update/

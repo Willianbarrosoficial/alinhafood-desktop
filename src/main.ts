@@ -201,9 +201,27 @@ function createWindow(localOrigin: string) {
 let pendingUpdate: { version: string } | null = null;
 let installUpdateFn: (() => void) | null = null;
 
+// Feed no painel, instalador no R2 (ver electron-builder.yml). A loja vai no
+// cabeçalho para o painel liberar uma versão por etapas (primeiro uma ou duas
+// lojas, depois todas), como faz com o Print Agent.
+const UPDATE_FEED_URL = 'https://alinhafood.com.br/api/desktop/update/';
+
+/** A loja deste PC: a ativa no painel (multi-empresa) ou a do espelho. */
+function lojaDoDesktop(): string | null {
+  const ativa = getMeta('active_restaurant_id');
+  if (ativa) return ativa;
+  const [loja] = readMirrorTable<{ id?: string }>('restaurants');
+  return loja?.id ?? null;
+}
+
 async function setupAutoUpdater() {
   if (!app.isPackaged) return;
   const { autoUpdater } = await import('electron-updater');
+  autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URL });
+  const comLoja = () => {
+    const loja = lojaDoDesktop();
+    autoUpdater.requestHeaders = loja ? { 'x-alinhafood-restaurant': loja } : null;
+  };
   autoUpdater.autoDownload = true;
   // NÃO instala sozinho no quit: mostra "Reiniciar para atualizar" e deixa o
   // usuário aplicar quando quiser (o UAC aparece uma vez, no clique dele).
@@ -214,13 +232,39 @@ async function setupAutoUpdater() {
     if (tray) tray.setToolTip(`Alinhafood — atualização ${info.version} pronta`);
     console.log(`[updater] atualização ${info.version} baixada — aguardando reinício`);
   });
+  // Antes de instalar, pergunta de novo ao painel: versão suspensa
+  // (`stage: 'paused'`) depois de baixada não entra, e sem resposta do
+  // servidor também não — mesma regra do Print Agent. A faixa some quando a
+  // versão foi suspensa; sem internet ela fica e o clique vale mais tarde.
   installUpdateFn = () => {
-    void backupBeforeUpdate();
-    autoUpdater.quitAndInstall(false, true);
+    const esperada = pendingUpdate?.version;
+    comLoja();
+    // Só a pergunta: o instalador já está baixado, e um download novo correndo
+    // junto do quitAndInstall disputaria o mesmo arquivo do cache.
+    autoUpdater.autoDownload = false;
+    void autoUpdater
+      .checkForUpdates()
+      .finally(() => { autoUpdater.autoDownload = true; })
+      .then(async (r) => {
+        if (!r || !r.isUpdateAvailable || r.updateInfo.version !== esperada) {
+          console.warn(`[updater] ${esperada} não está mais liberada (painel oferece ${r?.updateInfo.version ?? 'nada'}) — não instala`);
+          pendingUpdate = null;
+          if (tray) tray.setToolTip('Alinhafood');
+          return;
+        }
+        await backupBeforeUpdate();
+        autoUpdater.quitAndInstall(false, true);
+      })
+      .catch((err) => {
+        console.error('[updater] sem confirmação do painel, não instala agora:', (err as Error).message);
+      });
   };
-  const check = () => autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-    console.error('[updater] falha ao checar atualização:', err.message);
-  });
+  const check = () => {
+    comLoja();
+    return autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.error('[updater] falha ao checar atualização:', err.message);
+    });
+  };
   void check();
   setInterval(check, 6 * 60 * 60 * 1000);
 }

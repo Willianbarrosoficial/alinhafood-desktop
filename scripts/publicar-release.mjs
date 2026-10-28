@@ -5,6 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
+ * ⚠️ ARMADILHA: só serve para a PONTE (0.9.0). Desde a 0.9.0 a distribuição é
+ * pelo R2 + painel (scripts/entrada-atualizacao.mjs). Os PCs na 0.7.0/0.8.0
+ * ainda olham o GitHub Releases, então a 0.9.0 sai lá uma última vez — é ela
+ * que os traz para o feed novo. Depois da ponte, não publicar mais nada aqui.
+ *
  * Publica o instalador de dist-installer/ como release do GitHub, em dois passos:
  *
  *   node scripts/publicar-release.mjs            → cria o release como RASCUNHO e
