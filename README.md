@@ -56,8 +56,17 @@ fork 1:1), com chave aleatória de 256 bits guardada em `store.key`, protegida p
 ## Publicação / auto-update
 
 `electron-builder.yml` publica em GitHub Releases (`Willianbarrosoficial/alinhafood-desktop`).
-O app checa atualização no boot e a cada 6h (electron-updater). Para publicar:
-`GH_TOKEN=<token> npx electron-builder --win nsis --publish always`.
+O app checa atualização no boot e a cada 6h (electron-updater) e mostra a faixa "Reiniciar
+para atualizar". Depois do `npm run dist`:
+
+1. `node scripts/publicar-release.mjs` — confere versão e sha512 do pacote, cria o release como
+   **rascunho** e sobe os 3 arquivos. Ninguém vê.
+2. `node scripts/publicar-release.mjs --publicar` — o lançamento: o auto-update de todos os PCs
+   passa a oferecer a versão, e o link do painel (`/api/desktop/baixar`) a entregar ela.
+
+> ⚠️ ARMADILHA: no Mac com Apple Silicon o `npm run dist` precisa do Rosetta (`makensis` e
+> `wine` do electron-builder são x86_64). Uma atualização do macOS pode removê-lo — o erro é
+> `bad CPU type in executable`. Reinstalar: `softwareupdate --install-rosetta --agree-to-license`.
 
 ## Pendências conhecidas
 
